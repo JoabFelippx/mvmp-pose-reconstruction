@@ -1,6 +1,6 @@
 # Multi-view Multi-person 3D Pose Reconstruction
 
-Reconstrução 3D de poses humanas multi-câmera e multi-pessoa. O pipeline detecta esqueletos 2D por câmera, faz a correspondência entre vistas usando geometria epipolar (matrizes fundamentais) e reconstrói os pontos 3D por triangulação (DLT/SVD), com agrupamento via DBSCAN para lidar com múltiplas pessoas na cena.
+Reconstrução 3D de poses humanas multi-câmera e multi-pessoa. O pipeline detecta esqueletos 2D por câmera, faz a correspondência entre vistas usando geometria epipolar (matrizes fundamentais) e reconstrói os pontos 3D por triangulação (DLT/SVD).
 
 O sistema suporta duas fontes de entrada:
 
