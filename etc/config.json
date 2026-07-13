@@ -1,6 +1,6 @@
 {
     "default_initialization": {
-        "calib_path": "calib_cameras",
+        "calib_path": "calibrations",
         "data_path": "videos",
         "num_cameras": 4,
         "data_type": "videos",

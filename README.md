@@ -7,6 +7,8 @@ O sistema suporta duas fontes de entrada:
 - **`dataset`** — vídeos ou sequências de imagens locais (ex.: CMU Panoptic, Campus, Shelf).
 - **`is`** — streaming em tempo real via [Espaço Inteligente (IS)](https://github.com/Lab-SEA), consumindo mensagens de um broker AMQP.
 
+![](figures/image1.png)
+
 ---
 
 ## Sumário
