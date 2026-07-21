@@ -1,0 +1,79 @@
+---
+# ConfigMap com o config.json montado em /app/etc
+# Edite os valores abaixo conforme seu ambiente antes de aplicar.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pose-reconstructor-config
+data:
+  config.json: |
+    {
+      "is_settings": {
+        "broker_uri": "amqp://guest:guest@10.10.2.211:30000"
+      },
+      "default_initialization": {
+        "num_cameras": 4,
+        "calib_path": "calibrations/calib_rt",
+        "use_undistorted": true,
+        "apply_undistort": true
+      },
+      "keypoint_settings": {
+        "num_keypoints": 18,
+        "skeleton_connections": [],
+        "keypoint_names": []
+      },
+      "matcher_parameters": {
+        "use_cycle_consistency": true,
+        "sigma_tolerance": 15.0,
+        "max_error_per_joint": 20.0,
+        "weight_quality": 0.7,
+        "weight_quantity": 0.3,
+        "min_compatibility_score": 0.3,
+        "top_k_cycle_candidates": 3,
+        "early_stop_cycle_score": 0.7,
+        "weight_cycle": 0.5,
+        "min_cycle_score": 0.50,
+        "max_intersection_dist": 3.0,
+        "weight_distance": 0.60,
+        "weight_score": 0.40,
+        "min_keypoints_for_grouping": 10,
+        "min_kp_ratio": 0.30,
+        "min_fallback_score": 0.78
+      }
+    }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pose-reconstructor
+  labels:
+    app: pose-reconstructor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pose-reconstructor
+  template:
+    metadata:
+      labels:
+        app: pose-reconstructor
+    spec:
+      containers:
+        - name: pose-reconstructor
+          image: joabfsl/pose-reconstructor:v1
+          imagePullPolicy: Never        # imagem já carregada nos nodes via ctr import
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"
+          volumeMounts:
+            - name: config
+              mountPath: /app/etc       # onde o Dockerfile declara VOLUME ["/app/etc"]
+      volumes:
+        - name: config
+          configMap:
+            name: pose-reconstructor-config

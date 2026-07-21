@@ -1,0 +1,20 @@
+version: "3.9"
+
+services:
+  skeleton-tracker:
+    build:
+      context: .
+      dockerfile: docker/is/Dockerfile
+    image: skeleton-3d:v1
+    container_name: skeleton_tracker_3d
+
+    # Carrega variáveis do arquivo .env (crie a partir do .env.example)
+    env_file:
+      - .env
+
+    # config.json é opcional — fallback para campos estáticos (kp_weights, skeleton_connections)
+    volumes:
+      - ./etc:/app/etc:ro
+
+    restart: unless-stopped
+    network_mode: host
