@@ -25,6 +25,5 @@ Thumbs.db
 *.avi
 outputs/
 
-docker-compose.yaml
-Dockerfile
-pose-reconstructor.yaml
+install/
+log/
