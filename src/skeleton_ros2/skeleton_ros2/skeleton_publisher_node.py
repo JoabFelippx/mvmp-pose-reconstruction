@@ -240,7 +240,7 @@ class SkeletonPublisherNode(Node):
                 points_marker.points.append(Point(x=float(x), y=float(y), z=float(z)))
 
             marker_array.markers.append(points_marker)
-            current_ids.add(points_marker.id)
+            current_ids.add((points_marker.ns, points_marker.id))
 
             # ── Marker 2: ossos como linhas (LINE_LIST) ──────────────────
             lines_marker = Marker()
@@ -264,23 +264,35 @@ class SkeletonPublisherNode(Node):
                     lines_marker.points.append(Point(x=float(x2), y=float(y2), z=float(z2)))
 
             marker_array.markers.append(lines_marker)
-            current_ids.add(lines_marker.id)
+            current_ids.add((lines_marker.ns, lines_marker.id))
 
         # ── Limpeza: remove markers de pessoas que saíram de cena ────────
         # Sem isso, se a "pessoa 3" some, o marker dela fica "congelado"
         # no RViz2 para sempre, pois nunca mais recebe um ADD com ação
         # de update. Publicamos um DELETE explícito para cada ID que
         # existia no frame anterior mas não existe mais neste.
+        # stale_ids = self._last_marker_ids - current_ids
+        # for stale_id in stale_ids:
+        #     delete_marker = Marker()
+        #     delete_marker.header.frame_id = self.frame_id
+        #     delete_marker.header.stamp = now
+        #     delete_marker.id = stale_id
+        #     delete_marker.action = Marker.DELETE
+        #     marker_array.markers.append(delete_marker)
+
+        # self._last_marker_ids = current_ids
         stale_ids = self._last_marker_ids - current_ids
-        for stale_id in stale_ids:
+        for stale_ns, stale_id in stale_ids:
             delete_marker = Marker()
             delete_marker.header.frame_id = self.frame_id
             delete_marker.header.stamp = now
+            delete_marker.ns = stale_ns          
             delete_marker.id = stale_id
             delete_marker.action = Marker.DELETE
             marker_array.markers.append(delete_marker)
 
         self._last_marker_ids = current_ids
+
         return marker_array
 
 
