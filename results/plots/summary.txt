@@ -1,0 +1,38 @@
+Campus sem cycle
+  dataset: campus
+  avg_pcp_first_3_actors: 95.28%
+  recall: 99.73%
+  nearest_prediction_mpjpe_mm_mean: 88.30 mm
+  Actor 1: 95.71%
+  Actor 2: 92.59%
+  Actor 3: 97.54%
+
+Campus com cycle
+  dataset: campus
+  avg_pcp_first_3_actors: 92.51%
+  recall: 96.54%
+  nearest_prediction_mpjpe_mm_mean: 154.92 mm
+  Actor 1: 95.71%
+  Actor 2: 92.12%
+  Actor 3: 89.71%
+
+Shelf sem cycle
+  dataset: shelf
+  avg_pcp_first_3_actors: 93.18%
+  recall: 99.02%
+  nearest_prediction_mpjpe_mm_mean: 80.60 mm
+  Actor 1: 93.41%
+  Actor 2: 88.38%
+  Actor 3: 97.76%
+  Actor 4: 72.42%
+
+Shelf com cycle
+  dataset: shelf
+  avg_pcp_first_3_actors: 96.02%
+  recall: 99.80%
+  nearest_prediction_mpjpe_mm_mean: 74.42 mm
+  Actor 1: 96.45%
+  Actor 2: 93.78%
+  Actor 3: 97.83%
+  Actor 4: 74.24%
+

@@ -1,17 +1,14 @@
-# visão computacional
 numpy
 opencv-python-headless
 ultralytics
 
-# visualização
 matplotlib
 
-# mensageria IS-Wire / protobuf
 is-wire
 is-msgs
 protobuf
 six
 
-# grafos (skeleton matcher)
-networkx
-
+vispy
+PyQt6
+scipy
