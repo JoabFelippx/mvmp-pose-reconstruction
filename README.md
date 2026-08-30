@@ -687,7 +687,7 @@ Os experimentos abaixo utilizam as mesmas detecções 2D e o mesmo método de tr
 
 ### Resultados gerais
 
-| Dataset | Cycle consistency | PCP3D (%) | Recall@500mm (%) | MPJPE (mm) |
+| Dataset | Cycle support | PCP3D (%) | Recall@500mm (%) | MPJPE (mm) |
 |---|---:|---:|---:|---:|
 | Campus | Não | **95.28** | **99.73** | **88.30** |
 | Campus | Sim | 92.51 | 96.54 | 154.92 |
