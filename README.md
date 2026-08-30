@@ -30,6 +30,10 @@ Também é possível executar a detecção 2D separadamente e reutilizar os resu
   - [Modo IS](#modo-is)
 - [Matching multi-câmera](#matching-multi-câmera)
 - [Reconstrução e erro de reprojeção](#reconstrução-e-erro-de-reprojeção)
+- [Exportação das reconstruções 3D](#exportação-das-reconstruções-3d)
+- [Avaliação com Ground Truth](#avaliação-com-ground-truth)
+- [Resultados experimentais](#resultados-experimentais)
+- [Geração dos gráficos](#geração-dos-gráficos)
 - [Visualização 3D](#visualização-3d)
 - [Otimizações de desempenho](#otimizações-de-desempenho)
 - [Estrutura do projeto](#estrutura-do-projeto)
@@ -72,6 +76,12 @@ Triangulação
 Esqueletos 3D
         │
         ├── Métricas de reprojeção
+        ├── Exportação JSON
+        │       │
+        │       └── Avaliação com Ground Truth
+        │               ├── PCP3D
+        │               ├── Recall@500mm
+        │               └── MPJPE
         │
         └── Visualização Vispy/OpenGL
 ```
@@ -96,6 +106,10 @@ Quando `use_undistorted=true`, o pipeline utiliza `nK`, correspondente à matriz
 - reconstrução 3D por DLT/SVD;
 - erro de reprojeção;
 - métricas de reprojeção por câmera e por joint;
+- exportação das reconstruções 3D em JSON COCO17;
+- avaliação em Campus e Shelf com PCP3D, Recall@500mm e MPJPE;
+- comparação experimental com e sem cycle consistency;
+- geração automática de gráficos a partir dos arquivos de métricas;
 - visualização 3D com Vispy/OpenGL;
 - câmera 3D fixa ou automática;
 - processamento offline da YOLO com I/O paralelo e inferência em batch.
@@ -108,6 +122,7 @@ Quando `use_undistorted=true`, o pipeline utiliza `nK`, correspondente à matriz
 - NumPy
 - OpenCV
 - SciPy
+- Matplotlib
 - Ultralytics
 - Vispy
 - PyQt6
@@ -149,7 +164,14 @@ O modelo YOLO não precisa ser armazenado no GitHub. Coloque o arquivo localment
 ## Datasets e calibrações
 
 As calibrações (arquivos `.npz`) — tanto do modo IS (`calibrations/`) quanto dos datasets Campus e Shelf (`datasets/Campus_Seq1/`, `datasets/Shelf_Seq1/`) — **já estão incluídas neste repositório**, já convertidas para o formato esperado pelo pipeline (`K`, `dist`, `rt`, opcionalmente `nK`/`roi`).
- 
+
+As anotações 3D utilizadas na avaliação também estão armazenadas em:
+
+```text
+datasets/Campus_Seq1/annotation_3d.json
+datasets/Shelf_Seq1/annotation_3d.json
+```
+
 O que **não está neste repositório** são os vídeos/frames dos datasets (arquivos grandes demais para o GitHub). Eles foram retirados do paper:
  
 > **Chen, L., Ai, H., Chen, R., Zhuang, Z., & Liu, S. (2020).** *Cross-View Tracking for Multi-Human 3D Pose Estimation at over 100 FPS.* CVPR 2020.
@@ -465,66 +487,271 @@ Essas informações também podem ser exibidas no visualizador 3D.
 
 ---
 
-## Visualização 3D
+## Exportação das reconstruções 3D
 
-A visualização 3D utiliza **Vispy/OpenGL** em vez de Matplotlib.
+As reconstruções produzidas pelo pipeline podem ser armazenadas em JSON para avaliação posterior. Dessa forma, alterações no código de avaliação não exigem executar novamente detecção 2D, matching e triangulação.
 
-Os objetos gráficos são criados uma única vez e seus buffers são atualizados entre os frames.
+O arquivo é salvo no formato **COCO17**, com um vetor de 17 posições por pessoa. Joints que não puderam ser reconstruídos são armazenados como `null`, evitando confundir ausência de informação com a coordenada `[0, 0, 0]`.
 
-Isso reduz o custo da visualização contínua.
+Exemplo simplificado:
 
-O viewer mostra:
-
-- joints 3D;
-- conexões do esqueleto;
-- grid e eixos de referência;
-- cores diferentes por pessoa;
-- erro médio de reprojeção;
-- RMSE;
-- quantidade de observações utilizadas.
-
-A câmera pode ser configurada como automática ou fixa.
-
-O pipeline atualmente utiliza:
-
-```python
-SkeletonViewer3D(
-    size=(900, 700),
-    auto_camera=False,
-)
+```json
+{
+  "dataset": "campus",
+  "keypoint_format": "COCO17",
+  "coordinate_system": "world",
+  "use_cycle_consistency": true,
+  "frames": {
+    "350": {
+      "persons": [
+        {
+          "id": 1,
+          "keypoints_3d": [
+            [0.12, 1.03, 1.71],
+            null
+          ],
+          "matched_2d": {
+            "0": 1,
+            "1": 0,
+            "2": 2
+          }
+        }
+      ]
+    }
+  }
+}
 ```
 
+O argumento `--cycle` permite forçar a execução com ou sem o refinamento por consistência de ciclo, independentemente do valor definido em `config.json`. Os exemplos de execução abaixo utilizam Linux/bash.
+
+### Campus — com cycle consistency
+
+Linux:
+
+```bash
+python src/skeleton_tracker_main.py \
+    --source dataset \
+    --dataset_name campus \
+    --input_2d precomputed \
+    --detections_2d datasets/Campus_Seq1/detections_2d \
+    --save_3d_json results/campus_3d.json \
+    --save_every 100 \
+    --no_visualization \
+    --cycle on
+```
+
+### Campus — sem cycle consistency
+
+```bash
+python src/skeleton_tracker_main.py \
+    --source dataset \
+    --dataset_name campus \
+    --input_2d precomputed \
+    --detections_2d datasets/Campus_Seq1/detections_2d \
+    --save_3d_json results/campus_3d_no_cycle.json \
+    --save_every 100 \
+    --no_visualization \
+    --cycle off
+```
+
+### Shelf — com cycle consistency
+
+```bash
+python src/skeleton_tracker_main.py \
+    --source dataset \
+    --dataset_name shelf \
+    --input_2d precomputed \
+    --detections_2d datasets/Shelf_Seq1/detections_2d \
+    --save_3d_json results/shelf_3d.json \
+    --save_every 100 \
+    --no_visualization \
+    --cycle on
+```
+
+### Shelf — sem cycle consistency
+
+```bash
+python src/skeleton_tracker_main.py \
+    --source dataset \
+    --dataset_name shelf \
+    --input_2d precomputed \
+    --detections_2d datasets/Shelf_Seq1/detections_2d \
+    --save_3d_json results/shelf_3d_no_cycle.json \
+    --save_every 100 \
+    --no_visualization \
+    --cycle off
+```
+
+A opção `--no_visualization` é recomendada para benchmarks completos, pois evita o custo de renderização do VisPy/OpenCV. `--save_every` controla a frequência dos checkpoints do JSON.
+
 ---
 
-## Otimizações de desempenho
+## Avaliação com Ground Truth
 
-As principais otimizações implementadas são:
+As reconstruções 3D dos datasets **Campus** e **Shelf** podem ser comparadas com as anotações 3D armazenadas nos arquivos `annotation_3d.json`.
 
-1. **detecções 2D pré-computadas**
+O avaliador utilizado é:
 
-   A YOLO pode ser executada apenas uma vez e os JSONs reutilizados em experimentos posteriores.
+```text
+src/evaluate_shelf_campus.py
+```
 
-2. **mapas de undistortion pré-calculados**
+As predições do pipeline usam COCO17, enquanto as anotações de Campus/Shelf possuem 14 joints. O script realiza a conversão antes do cálculo das métricas.
 
-   `cv2.initUndistortRectifyMap()` é executado apenas uma vez por câmera.
+### Métricas
 
-3. **I/O paralelo**
+A métrica principal é **PCP3D (Percentage of Correctly estimated Parts)**, com `alpha = 0.5`.
 
-   Leitura e undistortion podem ser processadas com `ThreadPoolExecutor`.
+Também são calculadas métricas auxiliares:
 
-4. **inferência YOLO em batch**
+- PCP3D por ator;
+- PCP3D por grupo corporal;
+- Recall@500mm;
+- MPJPE da predição mais próxima do Ground Truth.
 
-   Várias imagens são enviadas simultaneamente para a GPU.
+Os grupos corporais usados no relatório são:
 
-5. **visualização com Vispy**
+- Head;
+- Torso;
+- Upper arms;
+- Lower arms;
+- Upper legs;
+- Lower legs.
 
-   A renderização 3D utiliza OpenGL e objetos visuais persistentes.
+### Frames avaliados
 
-6. **matcher simplificado**
+O protocolo utilizado considera:
 
-   O código antigo de interseção de epilinhas/MST foi removido, mantendo apenas as etapas efetivamente utilizadas pelo pipeline atual.
+- **Campus:** frames `350–470` e `650–750`, totalizando 222 frames;
+- **Shelf:** frames `300–600`, totalizando 301 frames.
+
+### Campus
+
+Com cycle consistency:
+
+```bash
+python src/evaluate_shelf_campus.py \
+    --dataset campus \
+    --predictions results/campus_3d.json \
+    --gt datasets/Campus_Seq1/annotation_3d.json \
+    --gt-unit cm \
+    --pred-unit m \
+    --output results/campus_metrics.json
+```
+
+Sem cycle consistency:
+
+```bash
+python src/evaluate_shelf_campus.py \
+    --dataset campus \
+    --predictions results/campus_3d_no_cycle.json \
+    --gt datasets/Campus_Seq1/annotation_3d.json \
+    --gt-unit cm \
+    --pred-unit m \
+    --output results/campus_metrics_no_cycle.json
+```
+
+### Shelf
+
+Com cycle consistency:
+
+```bash
+python src/evaluate_shelf_campus.py \
+    --dataset shelf \
+    --predictions results/shelf_3d.json \
+    --gt datasets/Shelf_Seq1/annotation_3d.json \
+    --gt-unit cm \
+    --pred-unit m \
+    --output results/shelf_metrics.json
+```
+
+Sem cycle consistency:
+
+```bash
+python src/evaluate_shelf_campus.py \
+    --dataset shelf \
+    --predictions results/shelf_3d_no_cycle.json \
+    --gt datasets/Shelf_Seq1/annotation_3d.json \
+    --gt-unit cm \
+    --pred-unit m \
+    --output results/shelf_metrics_no_cycle.json
+```
+
+As predições reconstruídas estão em metros e são convertidas para milímetros durante a avaliação. As anotações `annotation_3d.json` estão em centímetros e também são convertidas para milímetros.
 
 ---
+
+## Resultados experimentais
+
+Os experimentos abaixo utilizam as mesmas detecções 2D e o mesmo método de triangulação. A variável experimental é a utilização do refinamento das afinidades por suporte de ciclo antes do matching Hungarian.
+
+### Resultados gerais
+
+| Dataset | Cycle consistency | PCP3D (%) | Recall@500mm (%) | MPJPE (mm) |
+|---|---:|---:|---:|---:|
+| Campus | Não | **95.28** | **99.73** | **88.30** |
+| Campus | Sim | 92.51 | 96.54 | 154.92 |
+| Shelf | Não | 93.18 | 99.02 | 80.60 |
+| Shelf | Sim | **96.02** | **99.80** | **74.42** |
+
+No **Shelf**, o suporte de ciclo aumentou o PCP3D de `93.18%` para `96.02%` e reduziu o MPJPE de `80.60 mm` para `74.42 mm`.
+
+No **Campus**, entretanto, o mesmo refinamento reduziu o PCP3D de `95.28%` para `92.51%` e aumentou o MPJPE de `88.30 mm` para `154.92 mm`.
+
+Esse comportamento mostra que o impacto do suporte de ciclo depende da qualidade das afinidades disponíveis entre as diferentes vistas e motiva a investigação de estratégias mais robustas para incorporar a informação de ciclo ao matching.
+
+> **Nota:** esses valores correspondem à configuração experimental atual do pipeline e podem mudar conforme os parâmetros e estratégias de matching forem atualizados.
+
+### Visualização dos resultados
+
+#### PCP3D médio
+
+![PCP3D médio](results/plots/01_avg_pcp3d.png)
+
+#### MPJPE
+
+![MPJPE](results/plots/03_mpjpe.png)
+
+#### PCP3D por grupo corporal
+
+![PCP3D por grupo corporal](results/plots/05_bone_groups.png)
+
+Os demais gráficos estão disponíveis em `results/plots/`.
+
+---
+
+## Geração dos gráficos
+
+Os gráficos podem ser regenerados a partir dos arquivos `*_metrics.json` utilizando `src/plot_metrics.py`.
+
+Linux:
+
+```bash
+python src/plot_metrics.py \
+    --metrics \
+    results/campus_metrics_no_cycle.json \
+    results/campus_metrics.json \
+    results/shelf_metrics_no_cycle.json \
+    results/shelf_metrics.json \
+    --labels \
+    "Campus sem cycle" \
+    "Campus com cycle" \
+    "Shelf sem cycle" \
+    "Shelf com cycle" \
+    --output-dir results/plots
+```
+
+São gerados:
+
+```text
+results/plots/
+├── 01_avg_pcp3d.png
+├── 02_recall.png
+├── 03_mpjpe.png
+├── 04_actor_pcp.png
+├── 05_bone_groups.png
+└── summary.txt
+```
 
 ## Estrutura do projeto
 
@@ -532,6 +759,16 @@ As principais otimizações implementadas são:
 src/
 ├── skeleton_tracker_main.py
 │   # entry point: dataset ou IS
+│   # execução e exportação das reconstruções 3D
+│
+├── prediction_exporter.py
+│   # serialização das reconstruções em JSON COCO17
+│
+├── evaluate_shelf_campus.py
+│   # avaliação PCP3D, Recall@500mm e MPJPE
+│
+├── plot_metrics.py
+│   # geração dos gráficos dos experimentos
 │
 ├── extract_2d_yolo_threaded.py
 │   # extração offline de poses 2D
@@ -571,6 +808,23 @@ src/
 └── is_utils/
     ├── stream_handler.py
     └── streamChannel.py
+
+results/
+├── campus_3d.json
+├── campus_3d_no_cycle.json
+├── shelf_3d.json
+├── shelf_3d_no_cycle.json
+├── campus_metrics.json
+├── campus_metrics_no_cycle.json
+├── shelf_metrics.json
+├── shelf_metrics_no_cycle.json
+└── plots/
+    ├── 01_avg_pcp3d.png
+    ├── 02_recall.png
+    ├── 03_mpjpe.png
+    ├── 04_actor_pcp.png
+    ├── 05_bone_groups.png
+    └── summary.txt
 ```
 
 ---
