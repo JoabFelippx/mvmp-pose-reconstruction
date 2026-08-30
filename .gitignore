@@ -1,29 +1,20 @@
-env/
-venv/
-.venv/
-
+# Python
 __pycache__/
 *.pyc
 *.pyo
-*.egg-info/
-*.egg
-build/
-dist/
 
-datasets/*/frames/
-datasets/*/*.json
+# Virtual environments
+.venv/
+venv/
+env/
 
-models/*.pt
+# Modelos YOLO
+*.pt
+*.pth
+*.engine
 
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
+# Downloads temporários
+*.part
 
-*.log
-*.mp4
-*.avi
-outputs/
-
-install/
-log/
+# Frames dos datasets
+datasets/**/frames/

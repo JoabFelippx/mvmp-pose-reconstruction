@@ -1,184 +1,534 @@
 import cv2
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
+from vispy import app, scene
+from vispy.scene import transforms
+
+app.use_app("pyqt6")
+
+PERSON_COLORS = [
+    [0.8,  0.3,  1.0,  1.0],
+    [0.0,  0.85, 1.0,  1.0],
+    [0.3,  1.0,  0.4,  1.0],
+    [1.0,  0.6,  0.1,  1.0],
+    [1.0,  0.4,  0.7,  1.0],
+    [1.0,  0.9,  0.1,  1.0],
+    [0.4,  0.7,  1.0,  1.0],
+    [1.0,  0.3,  0.3,  1.0],
+]
 
 
-class Visualizer:
-    """Visualizador 3D de esqueletos usando Matplotlib (backend Agg, sem display)."""
+# COCO-17
+SKELETON_EDGES = [
+    # cabeça
+    (1, 2),
+    (1, 3),
+    (2, 4),
+    (3, 5),
 
-    SKELETON_CONNECTIONS = [
-        (16,  14),  
-        (14,  12),  
-        (17,  15),  
-        (15,  13),  
-        (12,  13),  
-        (6,  12),   
-        (7,  13),   
-        (6,  7),    
-        (6,  8),    
-        (8,  10),   
-        (7,  9),    
-        (9,  11),   
-        (2,  3),    
-        (1,  2),
-        (1,  3),
-        (2,  4),    
-        (3,  5),    
-    ]
+    # tronco
+    (6, 7),
+    (6, 12),
+    (7, 13),
+    (12, 13),
 
-    # Paleta de cores por pessoa (matplotlib color strings)
-    PERSON_COLORS = [
-        '#A855F7',  # violeta
-        '#22D3EE',  # cyan
-        '#4ADE80',  # verde
-        '#FB923C',  # laranja
-        '#F472B6',  # rosa
-        '#FACC15',  # amarelo
-    ]
+    # braço esquerdo
+    (6, 8),
+    (8, 10),
 
-    def __init__(self, all_calibs_parameters, size=(800, 600)):
-        """
-        Args:
-            all_calibs_parameters: dict de parâmetros de calibração por câmera.
-            size: tamanho da imagem de saída (largura, altura) em pixels.
-        """
-        self.all_calibs_parameters = all_calibs_parameters
-        self.dpi = 100
-        w_in = size[0] / self.dpi
-        h_in = size[1] / self.dpi
+    # braço direito
+    (7, 9),
+    (9, 11),
 
-        self.fig = plt.figure(figsize=(w_in, h_in), dpi=self.dpi, )
-        self.ax: Axes3D = self.fig.add_subplot(111, projection='3d')
+    # perna esquerda
+    (12, 14),
+    (14, 16),
 
-        # Ângulo de visão inicial
-        self.ax.view_init(elev=20, azim=-110)
+    # perna direita
+    (13, 15),
+    (15, 17),
+]
 
-        # Limites padrão (metros)
-        self._xlim = (-4.5, 4.5)
-        self._ylim = (-4.5, 4.5)
-        self._zlim = (0.0,  3.0)
 
-        self._color_cache: dict = {}
+class SkeletonViewer3D:
 
-    # ------------------------------------------------------------------
-    # Helpers privados
-    # ------------------------------------------------------------------
+    def __init__(
+        self,
+        size=(900, 700),
+        auto_camera=True,
+    ):
 
-    def _get_color(self, person_id: int) -> str:
-        if person_id not in self._color_cache:
-            self._color_cache[person_id] = self.PERSON_COLORS[
-                len(self._color_cache) % len(self.PERSON_COLORS)
-            ]
-        return self._color_cache[person_id]
+        self.width, self.height = size
+        self.auto_camera = auto_camera
 
-    # Comprimento das setas dos eixos das câmeras (metros)
-    CAMERA_AXIS_LEN = 0.3
+        # --------------------------------------------------
+        # Canvas Vispy
+        # --------------------------------------------------
 
-    def _draw_cameras(self):
-        """Plota os eixos locais (X=vermelho, Y=verde, Z=azul) de cada câmera."""
-        axis_len = self.CAMERA_AXIS_LEN
-        axis_colors = ('red', 'green', 'blue')   # X, Y, Z
-
-        for cam_idx, params in self.all_calibs_parameters.items():
-            rt = params['rt']          # (3, 4)
-            R  = rt[:, :3]
-            t  = rt[:, 3]
-            cam_center = -R.T @ t      # centro óptico no mundo
-
-            # Colunas de R.T são os eixos locais expressos no sistema mundo
-            axes_world = R.T            # shape (3, 3) — cada coluna é um eixo
-
-            for axis_idx, color in enumerate(axis_colors):
-                direction = axes_world[:, axis_idx] * axis_len
-                self.ax.quiver(
-                    cam_center[0], cam_center[1], cam_center[2],
-                    direction[0],  direction[1],  direction[2],
-                    color=color, linewidth=1.5, arrow_length_ratio=0.3,
-                )
-
-            self.ax.text(
-                cam_center[0], cam_center[1], cam_center[2] + axis_len + 0.05,
-                f'Cam {cam_idx + 1}',
-                color='black', fontsize=7, ha='center',
-            )
-
-    def _draw_skeleton(self, skeleton: dict, color: str):
-        """Plota keypoints e conexões de um único esqueleto."""
-        if not skeleton:
-            return
-
-        # Conexões
-        for (src, dst) in self.SKELETON_CONNECTIONS:
-            if src in skeleton and dst in skeleton:
-                p1 = skeleton[src]
-                p2 = skeleton[dst]
-                self.ax.plot(
-                    [p1[0], p2[0]],
-                    [p1[1], p2[1]],
-                    [p1[2], p2[2]],
-                    color=color, linewidth=2.0, solid_capstyle='round',
-                )
-
-    def _configure_axes(self):
-        """Estiliza os eixos."""
-        ax = self.ax
-        ax.set_xlim(*self._xlim)
-        ax.set_ylim(*self._ylim)
-        ax.set_zlim(*self._zlim)
-
-        ax.set_xlabel('X (m)', fontsize=8)
-        ax.set_ylabel('Y (m)', fontsize=8)
-        ax.set_zlabel('Z (m)', fontsize=8)
-
-        ax.tick_params(labelsize=6)
-        for pane in (ax.xaxis.pane, ax.yaxis.pane, ax.zaxis.pane):
-            pane.fill = False
-
-        ax.grid(True, linewidth=0.5)
-
-    def _fig_to_bgr(self) -> np.ndarray:
-        """Converte a figura Matplotlib em array BGR (OpenCV)."""
-        self.fig.canvas.draw()
-        buf = self.fig.canvas.buffer_rgba()
-        rgba = np.asarray(buf, dtype=np.uint8)
-        return cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR)
-
-    # ------------------------------------------------------------------
-    # API pública
-    # ------------------------------------------------------------------
-
-    def update(self, skeletons_to_visualize: list) -> np.ndarray:
-        """
-        Atualiza a visualização e retorna imagem BGR (numpy array).
-
-        Args:
-            skeletons_to_visualize: lista de dicts com chaves:
-                - 'id'          : int
-                - 'skeleton_3d' : dict {kp_id: [x, y, z]}
-
-        Returns:
-            np.ndarray BGR, shape (H, W, 3).
-        """
-        self.ax.clear()
-        self._configure_axes()
-        self._draw_cameras()
-
-        num_people = 0
-        for person in skeletons_to_visualize:
-            skeleton = person.get('skeleton_3d', {})
-            if not skeleton:
-                continue
-            color = "#A855F7" 
-            self._draw_skeleton(skeleton, color)
-            num_people += 1
-
-        # Legenda discreta
-        self.ax.set_title(
-            f'Pessoas detectadas: {num_people}',
-            color='white', fontsize=9, pad=4,
+        self.canvas = scene.SceneCanvas(
+            keys=None,
+            bgcolor=(0.95, 0.95, 0.95, 1.0),
+            size=size,
+            show=False,
         )
 
-        return self._fig_to_bgr()
+        self.view = self.canvas.central_widget.add_view()
+
+        # --------------------------------------------------
+        # Câmera 3D
+        # --------------------------------------------------
+
+        self.camera = scene.cameras.TurntableCamera(
+            fov=70,
+            elevation=25,
+            azimuth=-60,
+        )
+
+        self.view.camera = self.camera
+        self.view.camera.distance = 6
+
+        # --------------------------------------------------
+        # Cena
+        # --------------------------------------------------
+
+        self._setup_scene()
+
+        # --------------------------------------------------
+        # Visuals persistentes
+        #
+        # Não recriamos esses objetos em cada frame.
+        # Apenas fazemos set_data().
+        # --------------------------------------------------
+
+        self.lines = scene.visuals.Line(
+            pos=np.zeros((0, 3), dtype=np.float32),
+            connect="segments",
+            width=3,
+            method="gl",
+            parent=self.view.scene,
+        )
+
+        self.markers = scene.visuals.Markers(
+            parent=self.view.scene
+        )
+
+        # Primeira configuração de câmera
+        self._camera_initialized = False
+
+    # ======================================================
+    # CENA
+    # ======================================================
+
+    def _setup_scene(self):
+
+        # Chão
+        grid = scene.visuals.GridLines(
+            color=(0.4, 0.4, 0.4, 0.35),
+            parent=self.view.scene,
+        )
+
+        # Dependendo de como seu mundo está orientado,
+        # pode ser interessante deixar o grid no plano XY.
+        grid.transform = transforms.MatrixTransform()
+
+        # Eixos XYZ
+        axis = scene.visuals.XYZAxis(
+            parent=self.view.scene
+        )
+
+        axis.transform = transforms.STTransform(
+            scale=(0.5, 0.5, 0.5)
+        )
+
+    # ======================================================
+    # KEYPOINTS
+    # ======================================================
+
+    @staticmethod
+    def _parse_keypoints(kp_dict):
+
+        pts = {}
+
+        if kp_dict is None:
+            return pts
+
+        for kp_id, value in kp_dict.items():
+
+            kp_id = int(kp_id)
+
+            # numpy
+            if isinstance(value, np.ndarray):
+
+                value = np.asarray(value).reshape(-1)
+
+                if len(value) >= 3:
+
+                    xyz = value[:3].astype(float)
+
+                    if np.all(np.isfinite(xyz)):
+                        pts[kp_id] = xyz
+
+            # lista / tuple
+            elif isinstance(value, (list, tuple)):
+
+                if len(value) >= 3:
+
+                    xyz = np.asarray(
+                        value[:3],
+                        dtype=float
+                    )
+
+                    if np.all(np.isfinite(xyz)):
+                        pts[kp_id] = xyz
+
+            # dict
+            elif isinstance(value, dict):
+
+                if all(
+                    k in value
+                    for k in ("x", "y", "z")
+                ):
+
+                    xyz = np.array([
+                        value["x"],
+                        value["y"],
+                        value["z"],
+                    ], dtype=float)
+
+                    if np.all(np.isfinite(xyz)):
+                        pts[kp_id] = xyz
+
+        return pts
+
+    # ======================================================
+    # NORMALIZAR INPUT
+    # ======================================================
+
+    @staticmethod
+    def _normalize_input(skeletons_3d):
+        """Normaliza os formatos aceitos pelo viewer sem perder metadados.
+
+        O formato principal do pipeline é uma lista de pessoas contendo
+        ``id``, ``skeleton_3d``, ``matche_2d`` e ``reprojection``.
+        """
+
+        normalized = []
+
+        # Formato simples: {person_id: {kp_id: [X, Y, Z], ...}}
+        if isinstance(skeletons_3d, dict):
+            for person_idx, skeleton in skeletons_3d.items():
+                normalized.append({
+                    "person_idx": int(person_idx),
+                    "id": int(person_idx) + 1,
+                    "skeleton_3d": skeleton,
+                    "matche_2d": None,
+                    "reprojection": None,
+                })
+            return normalized
+
+        # Formato usado pelo skeleton_tracker_main.py
+        if isinstance(skeletons_3d, list):
+            for person_idx, person in enumerate(skeletons_3d):
+                if not isinstance(person, dict):
+                    continue
+
+                skeleton = person.get("skeleton_3d", person)
+
+                normalized.append({
+                    "person_idx": person_idx,
+                    "id": int(person.get("id", person_idx + 1)),
+                    "skeleton_3d": skeleton,
+                    "matche_2d": person.get("matche_2d"),
+                    "reprojection": person.get("reprojection"),
+                })
+
+        return normalized
+
+    # ======================================================
+    # CAMERA
+    # ======================================================
+
+    def _update_camera(self, points):
+
+        if len(points) == 0:
+            return
+
+        pts = np.asarray(
+            points,
+            dtype=np.float32
+        )
+
+        mins = np.min(pts, axis=0)
+        maxs = np.max(pts, axis=0)
+
+        center = (
+            mins + maxs
+        ) / 2.0
+
+        extent = maxs - mins
+
+        max_extent = float(
+            np.max(extent)
+        )
+
+        if max_extent < 1e-3:
+            max_extent = 1.0
+
+        self.camera.center = tuple(center)
+
+        # distância aproximada para enquadrar tudo
+        self.camera.distance = (
+            max_extent * 2.5
+        )
+
+    # ======================================================
+    # UPDATE
+    # ======================================================
+
+    def update(self, skeletons_3d):
+
+        persons = self._normalize_input(
+            skeletons_3d
+        )
+
+        all_points = []
+        all_point_colors = []
+
+        line_segments = []
+        line_colors = []
+
+        # --------------------------------------------------
+        # pessoas
+        # --------------------------------------------------
+
+        for person in persons:
+
+            person_idx = int(
+                person["person_idx"]
+            )
+
+            skeleton = person[
+                "skeleton_3d"
+            ]
+
+            color = np.asarray(
+                PERSON_COLORS[
+                    person_idx % len(PERSON_COLORS)
+                ],
+                dtype=np.float32,
+            )
+
+            pts_by_id = self._parse_keypoints(
+                skeleton
+            )
+
+            # ------------------------------------------
+            # joints
+            # ------------------------------------------
+
+            for point in pts_by_id.values():
+
+                all_points.append(
+                    point
+                )
+
+                all_point_colors.append(
+                    color
+                )
+
+            # ------------------------------------------
+            # bones
+            # ------------------------------------------
+
+            for kp_a, kp_b in SKELETON_EDGES:
+
+                if (
+                    kp_a not in pts_by_id
+                    or
+                    kp_b not in pts_by_id
+                ):
+                    continue
+
+                line_segments.extend([
+                    pts_by_id[kp_a],
+                    pts_by_id[kp_b],
+                ])
+
+                line_colors.extend([
+                    color,
+                    color,
+                ])
+
+        # ==================================================
+        # ATUALIZAR LINHAS
+        # ==================================================
+
+        if line_segments:
+
+            line_segments = np.asarray(
+                line_segments,
+                dtype=np.float32
+            )
+
+            line_colors = np.asarray(
+                line_colors,
+                dtype=np.float32
+            )
+
+            self.lines.visible = True
+
+            self.lines.set_data(
+                pos=line_segments,
+                color=line_colors,
+                connect="segments",
+                width=3,
+            )
+
+        else:
+
+            # Evita buffers internos inconsistentes no Vispy quando
+            # nao ha segmentos neste frame.
+            self.lines.visible = False
+
+        # ==================================================
+        # ATUALIZAR JOINTS
+        # ==================================================
+
+        if all_points:
+
+            points_array = np.asarray(
+                all_points,
+                dtype=np.float32
+            )
+
+            colors_array = np.asarray(
+                all_point_colors,
+                dtype=np.float32
+            )
+
+            self.markers.visible = True
+
+            self.markers.set_data(
+                points_array,
+                face_color=colors_array,
+                edge_color=(0, 0, 0, 1),
+                edge_width=0.5,
+                size=6,
+                symbol="o",
+            )
+
+        else:
+
+            # Evita buffers internos inconsistentes no Vispy quando
+            # nao ha pontos neste frame.
+            self.markers.visible = False
+
+        # ==================================================
+        # CAMERA
+        # ==================================================
+
+        if (
+            self.auto_camera
+            and all_points
+        ):
+
+            self._update_camera(
+                all_points
+            )
+
+        # ==================================================
+        # RENDER
+        # ==================================================
+
+        img = self.canvas.render()
+
+        img = np.asarray(img)
+
+        # Vispy retorna RGBA
+        bgr = cv2.cvtColor(
+            img,
+            cv2.COLOR_RGBA2BGR
+        )
+
+        # ==================================================
+        # ERRO DE REPROJEÇÃO
+        # ==================================================
+        # O Reconstructor3D já calcula as métricas em pixels.
+        # O OpenCV é usado somente para desenhar o texto sobre
+        # a imagem renderizada pelo Vispy, o que é barato.
+
+        text_y = 30
+
+        for person in persons:
+            reprojection = person.get("reprojection")
+
+            if not isinstance(reprojection, dict):
+                continue
+
+            mean_px = reprojection.get("mean_px")
+            rmse_px = reprojection.get("rmse_px")
+            num_points = reprojection.get("num_points", 0)
+
+            if mean_px is None or not np.isfinite(mean_px):
+                continue
+
+            person_id = int(
+                person.get("id", person["person_idx"] + 1)
+            )
+
+            if rmse_px is not None and np.isfinite(rmse_px):
+                text = (
+                    f"Pessoa {person_id} | "
+                    f"Reproj: {float(mean_px):.2f} px | "
+                    f"RMSE: {float(rmse_px):.2f} px | "
+                    f"Pts: {int(num_points)}"
+                )
+            else:
+                text = (
+                    f"Pessoa {person_id} | "
+                    f"Reproj: {float(mean_px):.2f} px | "
+                    f"Pts: {int(num_points)}"
+                )
+
+            rgba = PERSON_COLORS[
+                person["person_idx"] % len(PERSON_COLORS)
+            ]
+            text_color = (
+                int(rgba[2] * 255),
+                int(rgba[1] * 255),
+                int(rgba[0] * 255),
+            )
+
+            # Contorno escuro para manter a leitura sobre o fundo.
+            cv2.putText(
+                bgr,
+                text,
+                (20, text_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (20, 20, 20),
+                4,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                bgr,
+                text,
+                (20, text_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                text_color,
+                2,
+                cv2.LINE_AA,
+            )
+
+            text_y += 26
+
+        return bgr
+
+    # ======================================================
+    # CLOSE
+    # ======================================================
+
+    def close(self):
+
+        self.canvas.close()

@@ -37,7 +37,7 @@
         }
     },
     "yolo_model":{
-        "model_path": "models/yolo26m-pose.pt",
+        "model_path": "models/yolo26x-pose.pt",
         "tensorrt": true,
         "confi": 0.5,
         "iou": 0.65

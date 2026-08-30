@@ -54,7 +54,7 @@ class AppConfig:
     # ── matcher ───────────────────────────────────────────────────────────────
     use_cycle_consistency: bool = True
     sigma_tolerance: float = 15.0
-    max_error_per_joint: float = 20.0
+    max_error_per_joint: float = 30.0
     weight_quality: float = 0.7
     weight_quantity: float = 0.3
     min_compatibility_score: float = 0.3

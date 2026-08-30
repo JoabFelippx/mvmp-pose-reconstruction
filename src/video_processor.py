@@ -1,11 +1,14 @@
 import glob
 import os
 
+import json
+
 import cv2
 import numpy as np
 
-from skeletons import SkeletonsDetector
+from is_msgs.image_pb2 import ObjectAnnotations
 
+from skeletons import SkeletonsDetector
 
 class VideoProcessor:
 
@@ -23,6 +26,7 @@ class VideoProcessor:
         start_frame=0,
         filename_pattern="{prefix}{index}{ext}",
         camera_ids=None,
+        detections_2d_path=None
     ) -> None:
         """
         Parameters
@@ -61,7 +65,15 @@ class VideoProcessor:
 
         self.loop_frames = loop_frames
         self.current_frame_index = start_frame
-        self.skeletons_detector = SkeletonsDetector(yolo_model_path)
+        self.detections_2d_path = detections_2d_path
+
+        self.use_precomputed_2d = (detections_2d_path is not None)
+
+        if self.use_precomputed_2d:
+            self.skeleton_detector = None
+            self.precomputed_2d = self._load_precomputed_2d()
+        else:
+            self.skeleton_detector = (SkeletonsDetector(yolo_model_path))
 
         self.video_captures = []
         self.image_paths = []
@@ -104,6 +116,53 @@ class VideoProcessor:
             ext=self.file_extension,
         )
 
+    def _load_precomputed_2d(self):
+
+        detections = {}
+
+        for local_idx, cam_id in enumerate(self.camera_ids):
+
+            path = os.path.join(self.detections_2d_path, f"camera_{cam_id}.json")
+            if not os.path.exists(path):
+                raise FileExistsError(f"2D não exontrado: {path}")
+            
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            detections[local_idx] = data["frames"]
+
+            print(
+            f"[2D] Camera {cam_id}: "
+            f"{len(data['frames'])} frames"
+            )
+
+        return detections
+
+    def _json_to_annotations(self, persons, image_shape):
+
+        obs = ObjectAnnotations()
+
+        for person in persons:
+
+            obj = obs.objects.add()
+
+            obj.id = int(person["id"])
+            obj.label = "human"
+            obj.score = float(person["score"])
+
+            for kp in person["keypoints"]:
+                part = obj.keypoints.add()
+
+                part.id = int(kp["id"])
+
+                part.position.x = float(kp["x"])
+                part.position.y = float(kp["y"])
+                part.score = float(kp["score"])
+
+            obs.resolution.width = (image_shape[1])
+            obs.resolution.height = (image_shape[0])
+
+        return obs
     def _precompute_undistort_maps(self) -> None:
         """
         Pré-computa os mapas de undistortion para todas as câmeras usando
@@ -245,22 +304,35 @@ class VideoProcessor:
                 for local_idx, frame in enumerate(frames)
             ]
 
-        results_list = self.skeletons_detector.detect(frames)
-        annotations = []
-        for local_idx, results in enumerate(results_list):
-            scores = results.keypoints.conf
-            if scores is not None:
-                scores = scores.cpu().numpy().astype("float32")
-            else:
-                scores = np.array([])
+        if self.use_precomputed_2d:
 
-            obs = self.skeletons_detector.to_object_annotations(
-                results, scores, frames[local_idx].shape
-            )
-            # Undistortion já foi aplicada nos frames; keypoints detectados
-            # já estão no espaço corrigido — nenhum pós-processamento necessário.
-            annotations.append(obs)
+            annotations = []
 
+            frame_idx = (self.current_frame_index - 1 if self.data_type == "images" else self.current_frame_index)
+
+            for local_idx in range(self.num_cameras):
+                frames_cam = (self.precomputed_2d[local_idx])
+                persons = frames_cam.get(str(frame_idx),[])
+
+                obs = self._json_to_annotations(persons, frames[local_idx].shape)
+
+                annotations.append(obs)
+
+        else:
+
+            results_list = (self.skeleton_detector.detect(frames))
+            annotations = []
+            for local_idx, results in enumerate(results_list):
+                scores = results.keypoints.conf
+
+                if scores is not None:
+                    scores = scores.cpu().numpy().astype("float32")
+                else:
+                    scores = np.array([])
+                
+                obs = self.skeleton_detector.to_object_annotations(results, scores, frames[local_idx].shape)
+                annotations.append(obs)
+                
         return frames, annotations, frame_paths
 
     def release_resources(self):

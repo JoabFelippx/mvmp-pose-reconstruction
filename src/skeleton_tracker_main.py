@@ -8,7 +8,7 @@ from config import cfg
 from fundamental_matrices import FundamentalMatrices
 from skeleton_matcher import SkeletonMatcher
 from reconstructor_3d import Reconstructor3D
-from visualizer import Visualizer
+from visualizer import SkeletonViewer3D
 from utils import create_adaptive_camera_grid
 
 
@@ -86,19 +86,22 @@ def _build_matcher_params():
 def _run_reconstruction_step(matcher, reconstructor, annotations):
     """Passo comum a ambas as fontes: extrai, casa e reconstrói os esqueletos 3D."""
     skeletons_2d, ids_2d     = matcher.extract_skeletons_from_annotations(annotations)
-    matched_persons          = matcher.match_skeletons(skeletons_2d, ids_2d, [1])
+    matched_persons          = matcher.match_skeletons(skeletons_2d, ids_2d, cfg.use_cycle_consistency)
     reconstructed_skeletons  = reconstructor.reconstruct_all(matched_persons, annotations)
-
     skeletons_to_visualize = []
-    for idx, skeleton_data in enumerate(reconstructed_skeletons):
-        if not skeleton_data:
+    for idx, person_data in enumerate(reconstructed_skeletons):
+
+        skeleton_3d = person_data["skeleton_3d"]
+        reprojection = person_data["reprojection"]
+
+        if not skeleton_3d:
             continue
 
         skeletons_to_visualize.append({
             "id": idx + 1,
-            "skeleton_3d": skeleton_data,
-            "average_point": 0,
-            "matche_2d": 0,
+            "skeleton_3d": skeleton_3d,
+            "matche_2d": person_data["matche_2d"],
+            "reprojection": reprojection,
         })
 
     return skeletons_to_visualize
@@ -136,29 +139,37 @@ def run_is(args):
     channel       = StreamChannel(cfg.broker_uri)
     matcher       = SkeletonMatcher(fundamentals, matcher_params, cfg.is_num_cameras, cfg.num_keypoints)
     reconstructor = Reconstructor3D(projection_matrices, cfg.is_num_cameras, cfg.num_keypoints)
-    visualizer    = Visualizer(all_calibs_parameters)
+    viewer = SkeletonViewer3D(size=(900, 700), auto_camera=True)
 
     print("Loop principal iniciado (IS).")
-    while True:
-        raw_messages = stream.get_latest_messages()
-        if raw_messages is None:
-            continue
+    try:
+        while True:
+            raw_messages = stream.get_latest_messages()
+            if raw_messages is None:
+                continue
 
-        annotations = stream.prepare_input_data(raw_messages, calib_files_data)
+            annotations = stream.prepare_input_data(raw_messages, calib_files_data)
 
-        skeletons_to_visualize = _run_reconstruction_step(matcher, reconstructor, annotations)
+            skeletons_to_visualize = _run_reconstruction_step(
+                matcher, reconstructor, annotations
+            )
 
-        plot_img_bgr = visualizer.update(skeletons_to_visualize)
+            frame_3d = viewer.update(skeletons_to_visualize)
 
-        rendered_msg = Message()
-        rendered_msg.topic = "SkeletonDetector.3D"
-        rendered_msg.pack(_to_image(plot_img_bgr))
-        channel.publish(rendered_msg)
+            rendered_msg = Message()
+            rendered_msg.topic = "SkeletonDetector.3D"
+            rendered_msg.pack(_to_image(frame_3d))
+            channel.publish(rendered_msg)
 
-        skt_msg = Message()
-        skt_msg.topic = "SkeletonDetector.3D.Annotations"
-        skt_msg.body  = json.dumps(skeletons_to_visualize, default=numpy_to_list).encode("utf-8")
-        channel.publish(skt_msg)
+            skt_msg = Message()
+            skt_msg.topic = "SkeletonDetector.3D.Annotations"
+            skt_msg.body = json.dumps(
+                skeletons_to_visualize,
+                default=numpy_to_list,
+            ).encode("utf-8")
+            channel.publish(skt_msg)
+    finally:
+        viewer.close()
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -181,6 +192,14 @@ def run_dataset(args):
         ds_cfg = config_file["datasets"][dataset_name]
     else:
         ds_cfg = config_file["default_initialization"]
+
+    detections_2d_path = None
+
+    if args.input_2d == "precomputed":
+
+        if args.detections_2d is None:
+            raise ValueError("--detections_2d é obrigatório quando --input_2d precomputed")
+        detections_2d_path = args.detections_2d
 
     calib_path       = ds_cfg['calib_path']
     data_path        = ds_cfg['data_path']
@@ -236,6 +255,7 @@ def run_dataset(args):
         start_frame=start_frame,
         filename_pattern=filename_pattern,
         camera_ids=camera_ids,
+        detections_2d_path=detections_2d_path,
     )
 
     if data_type == "images":
@@ -248,46 +268,54 @@ def run_dataset(args):
     matcher_params = _build_matcher_params()
     matcher        = SkeletonMatcher(fundamentals, matcher_params, num_cameras_used, num_keypoints)
     reconstructor  = Reconstructor3D(projection_matrices, num_cameras_used, num_keypoints)
-    visualizer     = Visualizer(all_calibs_local)
+    viewer = SkeletonViewer3D(size=(900, 700), auto_camera=True)
 
     print("Loop principal iniciado (dataset).")
     frame_idx = start_frame
-    while (frame_idx < total_frames) if (data_type == "images") else True:
-        frames, annotations, frame_paths = video_processor.process_next_frame()
-        if annotations is None:
-            print("Fim dos dados (vídeo/imagens esgotados).")
-            break
 
-        skeletons_to_visualize = _run_reconstruction_step(matcher, reconstructor, annotations)
+    try:
+        while (frame_idx < total_frames) if (data_type == "images") else True:
+            frames, annotations, frame_paths = video_processor.process_next_frame()
 
-        plot_img_bgr = visualizer.update(skeletons_to_visualize)
+            if annotations is None:
+                print("Fim dos dados (vídeo/imagens esgotados).")
+                break
 
-        grid = create_adaptive_camera_grid(
-            frames,
-            cell_height=360,
-            cell_width=288,
-            add_labels=True,
-        )
-
-        h_grid = grid.shape[0]
-        h_map, w_map = plot_img_bgr.shape[:2]
-        if h_map != h_grid:
-            scale = h_grid / h_map
-            plot_img_bgr = cv2.resize(
-                plot_img_bgr,
-                (int(w_map * scale), h_grid),
-                interpolation=cv2.INTER_NEAREST,
+            skeletons_to_visualize = _run_reconstruction_step(
+                matcher, reconstructor, annotations
             )
 
-        imgcombined = np.hstack([grid, plot_img_bgr])
-        cv2.imshow("Multi-view Skeleton Matching - Dataset", imgcombined)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+            frame_3d = viewer.update(skeletons_to_visualize)
 
-        frame_idx += 1
+            grid = create_adaptive_camera_grid(
+                frames,
+                cell_height=360,
+                cell_width=288,
+                add_labels=True,
+            )
 
-    video_processor.release_resources()
-    cv2.destroyAllWindows()
+            h_grid = grid.shape[0]
+            h_map, w_map = frame_3d.shape[:2]
+
+            if h_map != h_grid:
+                scale = h_grid / h_map
+                frame_3d = cv2.resize(
+                    frame_3d,
+                    (int(w_map * scale), h_grid),
+                    interpolation=cv2.INTER_LINEAR,
+                )
+
+            imgcombined = np.hstack([grid, frame_3d])
+            cv2.imshow("Multi-view Skeleton Matching - Dataset", imgcombined)
+
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+
+            frame_idx += 1
+    finally:
+        video_processor.release_resources()
+        viewer.close()
+        cv2.destroyAllWindows()
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -302,12 +330,18 @@ def main():
                          help="[--source dataset] Nome do dataset (ex.: campus, shelf). Ignorado em --source is.")
     parser.add_argument('--cameras', type=str, default=None,
                          help="[--source dataset] Câmeras a usar: '0,1,3' | '0-4' | '0,2-4'. Ignorado em --source is.")
+    parser.add_argument("--input_2d", type=str, choices=["yolo", "precomputed"], default="yolo",
+                        help="Origem dos keypoints 2D: 'yolo' ou 'precomputed'.")
+    parser.add_argument("--detections_2d", type=str, default=None,
+                        help="Diretório com os JSONs 2D pré-computados.")
     args = parser.parse_args()
 
     if args.source == 'is':
         run_is(args)
     else:
         run_dataset(args)
+
+    
 
 
 if __name__ == "__main__":

@@ -1,31 +1,6 @@
-from typing import Dict
-from collections import defaultdict
-
 import numpy as np
-import networkx as nx
 from itertools import combinations
-
-
-# =============================================================================
-# Funções utilitárias vetorizadas
-# =============================================================================
-
-def compute_line_intersection_2d(line1, line2):
-    a1, b1, c1 = line1
-    a2, b2, c2 = line2
-    det = a1 * b2 - a2 * b1
-    if abs(det) < 1e-6:
-        return None
-    x = (b1 * c2 - b2 * c1) / det
-    y = (a2 * c1 - a1 * c2) / det
-    return np.array([x, y])
-
-
-def dist_p_l_vectorized(points, lines):
-    numerators   = np.abs(lines[:, 0] * points[:, 0] + lines[:, 1] * points[:, 1] + lines[:, 2])
-    denominators = np.sqrt(lines[:, 0]**2 + lines[:, 1]**2)
-    denominators[denominators == 0] = np.inf
-    return numerators / denominators
+from scipy.optimize import linear_sum_assignment
 
 
 def sampson_error_vectorized(pts1_h, pts2_h, F):
@@ -42,30 +17,28 @@ def sampson_error_vectorized(pts1_h, pts2_h, F):
     denominator[denominator < 1e-12] = np.inf
     return numerator / denominator
 
-class SkeletonMatcher:
-    def __init__(self, fundamentals, matcher_params, num_cameras, num_keypoints):
-        self.fundamentals   = fundamentals
-        self.num_keypoints  = num_keypoints
-        self.num_cameras    = num_cameras
 
-        self.sigma_tolerance          = matcher_params['sigma_tolerance']
-        self.max_error_per_joint      = matcher_params['max_error_per_joint']
-        self.weight_quality           = matcher_params['weight_quality']
-        self.weight_quantity          = matcher_params['weight_quantity']
-        self.min_compatibility_score  = matcher_params['min_compatibility_score']
-        self.top_k_cycle_candidates   = matcher_params['top_k_cycle_candidates']
-        self.early_stop_cycle_score   = matcher_params['early_stop_cycle_score']
-        self.weight_cycle             = matcher_params['weight_cycle']
-        self.min_cycle_score          = matcher_params['min_cycle_score']
-        self.max_intersection_dist    = matcher_params['max_intersection_dist']
-        self.weight_distance          = matcher_params['weight_distance']
-        self.weight_score             = matcher_params['weight_score']
-        self.min_keypoints_for_grouping = matcher_params['min_keypoints_for_grouping']
-        self.min_kp_ratio             = matcher_params['min_kp_ratio']
+
+class SkeletonMatcher:
+
+    def __init__(self, fundamentals, matcher_params, num_cameras, num_keypoints):
+        self.fundamentals = fundamentals
+        self.num_keypoints = num_keypoints
+        self.num_cameras = num_cameras
+
+        # Parâmetros realmente usados pelo pipeline atual.
+        self.sigma_tolerance = matcher_params["sigma_tolerance"]
+        self.max_error_per_joint = matcher_params["max_error_per_joint"]
+        self.weight_quality = matcher_params["weight_quality"]
+        self.weight_quantity = matcher_params["weight_quantity"]
+        self.min_compatibility_score = matcher_params["min_compatibility_score"]
+        self.weight_cycle = matcher_params["weight_cycle"]
 
         self.kp_weights_arr = np.array([
-            matcher_params['kp_weights'].get(i, 1.0) for i in range(num_keypoints)
+            matcher_params["kp_weights"].get(i, 1.0)
+            for i in range(num_keypoints)
         ])
+
 
     def extract_skeletons_from_annotations(self, annotations):
         skeletons_by_cam = []
@@ -89,25 +62,19 @@ class SkeletonMatcher:
 
         return skeletons_by_cam, ids_by_cam
 
-    # -------------------------------------------------------------------------
-    # Compatibilidade epipolar (sem alteração)
-    # -------------------------------------------------------------------------
-    def build_global_matrix(self, skeletons_by_cam, ids_by_cam):
-
-        all_skeletons = []
+    def build_global_matrix(self, skeletons_by_cam):
+        """Cria a matriz global de afinidade e os offsets de cada câmera."""
         cam_offsets = {}
         offset = 0
+
         for cam_idx, skeletons in enumerate(skeletons_by_cam):
             cam_offsets[cam_idx] = offset
-            for sk_id in ids_by_cam[cam_idx]:
-                all_skeletons.append((cam_idx, sk_id))
             offset += len(skeletons)
-        m = len(all_skeletons)
-        A_global_matrix = np.zeros((m, m))
-        
-        epilines_matrix = np.empty((m, m), dtype=object)
-        
-        return A_global_matrix, epilines_matrix, cam_offsets
+
+        affinity_matrix = np.zeros((offset, offset), dtype=np.float64)
+        return affinity_matrix, cam_offsets
+
+
     def _calculate_skeleton_compatibility_vectorized(self, sk1, sk2, F_1_to_2, F_2_to_1):
         valid_mask = ~((np.all(sk1 == 0, axis=1)) | (np.all(sk2 == 0, axis=1)))
 
@@ -140,44 +107,6 @@ class SkeletonMatcher:
         full_lines_on_1[valid_mask] = lines_on_1
 
         return combined_score, full_lines_on_1
-
-    # -------------------------------------------------------------------------
-    # Helper: epilinhas organizadas por keypoint a partir das matrizes globais
-    # -------------------------------------------------------------------------
-
-    def _organize_epilines_by_keypoint(self, cam_ref, idx_ref,
-                                        scores_matrix, epilines_matrix, valid_mask,
-                                        skeletons_by_cam):
-        """
-        Substitui organize_epilines_by_keypoint do dataclass.
-
-        Retorna dict:
-            { kp_idx : [(cam_other, idx_other, score, line_3), ...] }
-        """
-        lines_per_kp = {}
-
-        for cam_other in range(self.num_cameras):
-            if cam_other == cam_ref:
-                continue
-            for idx_other in range(len(skeletons_by_cam[cam_other])):
-                if not valid_mask[cam_ref, idx_ref, cam_other, idx_other]:
-                    continue
-
-                score    = float(scores_matrix[cam_ref, idx_ref, cam_other, idx_other])
-                epilines = epilines_matrix[cam_ref, idx_ref, cam_other, idx_other]  # (num_kp, 3)
-
-                for kp_idx in range(self.num_keypoints):
-                    line = epilines[kp_idx]
-                    if not np.isnan(line).any():
-                        lines_per_kp.setdefault(kp_idx, []).append(
-                            (cam_other, idx_other, score, line)
-                        )
-
-        return lines_per_kp
-
-    # -------------------------------------------------------------------------
-    # simple_match  →  preenche as matrizes globais
-    # -------------------------------------------------------------------------
 
     def simple_match(self, skeletons_by_cam, ids_by_cam, global_matrix, cam_offsets):
 
@@ -217,510 +146,302 @@ class SkeletonMatcher:
                             update_affinity(i_other, i_ref, compatibility_score)
 
         return affinity_matrix
-    
-    def index_to_cam_skeleton(self, index, cam_offsets, ids_by_cam):
-        """
-        Dado um índice da matriz global, retorna (cam_idx, skeleton_id)
-        """
-        sorted_cams = sorted(cam_offsets.items(), key=lambda x: x[1])
-        
-        cam_idx = None
-        for i, (cam, offset) in enumerate(sorted_cams):
-            next_offset = sorted_cams[i + 1][1] if i + 1 < len(sorted_cams) else float('inf')
-            if offset <= index < next_offset:
-                cam_idx = cam
-                local_index = index - offset
-                break
-        
-        skeleton_id = ids_by_cam[cam_idx][local_index]
-        
-        return cam_idx, skeleton_id
-    
-    def _calculate_epilines(self, sk_other, F_other_to_ref):
-        """
-        Calcula as linhas epipolares dos keypoints de sk_other projetadas na cam_ref.
-        Retorna array (num_keypoints, 3) com [a, b, c] para cada keypoint.
-        """
-        valid_mask = ~np.all(sk_other == 0, axis=1)
-
-        full_epilines = np.full((self.num_keypoints, 3), np.nan)
-
-        if not np.any(valid_mask):
-            return full_epilines
-
-        pts_other = sk_other[valid_mask]
-        ones = np.ones((pts_other.shape[0], 1))
-        pts_other_h = np.hstack([pts_other, ones])
-
-        epilines = (F_other_to_ref @ pts_other_h.T).T  # (n_valid, 3)
-
-        full_epilines[valid_mask] = epilines
-
-        return full_epilines
-    
-    def _intersect_epilines(self, epilines_list):
-
-        num_lines = len(epilines_list)
-        A = np.array([line[:2] for line in epilines_list])
-        b = np.array([-line[2] for line in epilines_list])
-        
-        point, residuals, _, _ = np.linalg.lstsq(A, b, rcond=None)
-        
-        if num_lines >= 3:
-            intersecoes_pares = []
-            for i in range(num_lines):
-                for j in range(i + 1, num_lines):
-                    A_par = A[[i, j]]
-                    b_par = b[[i, j]]
-                    try:
-                        p_par = np.linalg.solve(A_par, b_par)
-                        intersecoes_pares.append(p_par)
-                    except np.linalg.LinAlgError:
-                        continue
-
-            if len(intersecoes_pares) >= 2:
-                distancias = []
-                for k in range(len(intersecoes_pares)):
-                    for l in range(k + 1, len(intersecoes_pares)):
-                        distancias.append(np.linalg.norm(intersecoes_pares[k] - intersecoes_pares[l]))
-                
-                max_divergencia = max(distancias) if distancias else 0
-                limite_concordancia = 20.0 
-                
-                if max_divergencia > limite_concordancia:
-                    return np.array([1e6, 1e6])
-
-        return point
-
-    def refined_match(self, skeletons_by_cam, ids_by_cam, colum, line, cam_offsets, epilines_matrix):
-
-        indices_por_coluna = {}
-        for idx, col_val in enumerate(colum):
-            if col_val not in indices_por_coluna:
-                indices_por_coluna[col_val] = []
-            indices_por_coluna[col_val].append(idx)
-
-        for col_val, idxs in indices_por_coluna.items():
-
-            cam_ref, sk_id_ref = self.index_to_cam_skeleton(col_val, cam_offsets, ids_by_cam)
-            local_idx_ref = ids_by_cam[cam_ref].index(sk_id_ref)
-            sk_ref = skeletons_by_cam[cam_ref][local_idx_ref]
-
-            for i in idxs:
-                row_idx = line[i]
-                cam_other, sk_id_other = self.index_to_cam_skeleton(row_idx, cam_offsets, ids_by_cam)
-
-                if cam_ref == cam_other:
-                    continue
-
-                local_idx_other = ids_by_cam[cam_other].index(sk_id_other)
-                sk_other = skeletons_by_cam[cam_other][local_idx_other]
-
-                F_other_to_ref = self.fundamentals[cam_other][cam_ref]
-                epilines_on_ref = self._calculate_epilines(sk_other, F_other_to_ref)
-
-                F_ref_to_other = self.fundamentals[cam_ref][cam_other]
-                epilines_on_other = self._calculate_epilines(sk_ref, F_ref_to_other)
-
-                epilines_matrix[row_idx, col_val] = epilines_on_ref
-                epilines_matrix[col_val, row_idx] = epilines_on_other
-
-        return epilines_matrix
-    def intersection_affinity(self, skeletons_by_cam, ids_by_cam,
-                               colum, line, cam_offsets, epilines_matrix, A_simple):
-        """
-        Retorna:
-          A_intersection : np.ndarray (m, m)  – score de afinidade geométrica [0,1]
-          A_detail       : dict  (i,j) → {'avg_dist', 'avg_cost', 'avg_score', 'count'}
-                           guardado para o build_skeleton_groups usar métricas detalhadas
-        """
-        m              = epilines_matrix.shape[0]
-        A_intersection = np.zeros((m, m))
-        # Detalhe por par de índices globais para usar no build_skeleton_groups
-        A_detail: Dict = {}
-
-        # Mapeia col_val → lista de row_idx com epilinha calculada
-        indices_por_coluna = {}
-        for idx, col_val in enumerate(colum):
-            indices_por_coluna.setdefault(col_val, []).append(idx)
-
-        for col_val, idxs in indices_por_coluna.items():
-            cam_ref, sk_id_ref = self.index_to_cam_skeleton(col_val, cam_offsets, ids_by_cam)
-            local_ref          = ids_by_cam[cam_ref].index(sk_id_ref)
-            sk_ref             = skeletons_by_cam[cam_ref][local_ref]
-
-            # ── Passo 1: organizar epilinhas por keypoint ──────────────────────
-            # Cada entrada: (cam_other, sk_id_other, simple_score, line_3)
-            linhas_por_kp: Dict[int, list] = {}
-
-            for i in idxs:
-                row_idx = line[i]
-                if row_idx == col_val:
-                    continue
-
-                cam_other, sk_id_other = self.index_to_cam_skeleton(row_idx, cam_offsets, ids_by_cam)
-                if cam_other == cam_ref:
-                    continue
-
-                epilines = epilines_matrix[row_idx, col_val]
-                if epilines is None:
-                    continue
-
-                simple_score = float(A_simple[row_idx, col_val])
-
-                for kp_idx in range(self.num_keypoints):
-                    line_kp = epilines[kp_idx]
-                    if not np.isnan(line_kp).any():
-                        linhas_por_kp.setdefault(kp_idx, []).append(
-                            (cam_other, sk_id_other, simple_score, line_kp)
-                        )
-
-            # ── Passo 2-4: combinações par a par por keypoint ─────────────────
-            # Acumula por par (cam_other, sk_id_other) quantos keypoints
-            # apareceram como melhor combinação, mais custo / dist / score médios
-            connections_count : Dict = defaultdict(int)
-            connections_costs : Dict = defaultdict(float)
-            connections_dists : Dict = defaultdict(float)
-            connections_scores: Dict = defaultdict(float)
-
-            valid_kp_count = int(np.sum(~np.all(sk_ref == 0, axis=1)))
-
-            for kp_idx, data in linhas_por_kp.items():
-                if len(data) < 2:
-                    continue
-
-                candidate_combinations = list(combinations(data, 2))
-                graph_dists  = {}
-                graph_scores = {}
-
-                for (cam_1, skt_1, score_1, line_1), (cam_2, skt_2, score_2, line_2) in candidate_combinations:
-                    point_intersect = compute_line_intersection_2d(line_1, line_2)
-                    if point_intersect is None:
-                        continue
-
-                    # Distância do ponto a todas as linhas do keypoint
-                    all_lines  = np.array([entry[3] for entry in data])
-                    all_scores = np.array([entry[2] for entry in data])
-                    dists_to_lines = dist_p_l_vectorized(
-                        np.tile(point_intersect, (all_lines.shape[0], 1)),
-                        all_lines
-                    )
-                    avg_dist  = float(np.mean(dists_to_lines))
-                    avg_score = float(np.mean(all_scores))
-
-                    if avg_dist > self.max_intersection_dist:
-                        continue
-
-                    key = ((cam_1, skt_1), (cam_2, skt_2))
-                    graph_dists[key]  = avg_dist
-                    graph_scores[key] = avg_score
-
-                if not graph_scores:
-                    continue
-
-                best = self._select_best_combination(graph_scores, graph_dists)
-                best['avg_dist'] = graph_dists[best['original_key']]
-
-                for (cam_other, skt_other_id) in best['combination'].items():
-                    k = (cam_other, skt_other_id)
-                    connections_count[k]  += 1
-                    connections_costs[k]  += best['combined_cost']
-                    connections_dists[k]  += best['avg_dist']
-                    connections_scores[k] += best['score']
-
-            # ── Passo 5-6: threshold e preenchimento da A_intersection ─────────
-            relative_threshold = max(
-                self.min_keypoints_for_grouping,
-                int(np.ceil(self.min_kp_ratio * valid_kp_count))
-            )
-
-            for (cam_other, skt_other_id), count in connections_count.items():
-                if count < relative_threshold:
-                    continue
-
-                # Índice global do esqueleto other
-                local_other = ids_by_cam[cam_other].index(skt_other_id)
-                row_idx     = cam_offsets[cam_other] + local_other
-
-                avg_cost  = connections_costs[(cam_other, skt_other_id)]  / count
-                avg_dist  = connections_dists[(cam_other, skt_other_id)]  / count
-                avg_score = connections_scores[(cam_other, skt_other_id)] / count
-
-                # Score de interseção: penaliza custo (dist) e recompensa score epipolar
-                intersection_score = 1.0 / (abs(avg_cost) + 1e-6)
-                # Normaliza para [0,1] via sigmoid suave
-                intersection_score = float(np.tanh(intersection_score / 10.0))
-
-                # Preenche simétricamente
-                A_intersection[row_idx, col_val] = intersection_score
-                A_intersection[col_val, row_idx] = intersection_score
-
-                pair = (min(row_idx, col_val), max(row_idx, col_val))
-                A_detail[pair] = {
-                    'avg_cost':  avg_cost,
-                    'avg_dist':  avg_dist,
-                    'avg_score': avg_score,
-                    'count':     count,
-                }
-
-        return A_intersection, A_detail
-
-
-    def build_skeleton_groups(self, A_combined, cam_offsets, skeletons_by_cam, ids_by_cam,
-                               A_detail: Dict = None):
-        G = nx.Graph()
-
-        for cam_idx, skeletons in enumerate(skeletons_by_cam):
-            for sk_id in ids_by_cam[cam_idx]:
-                G.add_node((cam_idx, sk_id))
-
-        rows, cols = np.nonzero(A_combined)
-        for i, j in zip(rows, cols):
-            if i >= j:
-                continue
-
-            score = A_combined[i, j]
-            if score <= 0:
-                continue
-
-            cam_i, sk_id_i = self.index_to_cam_skeleton(i, cam_offsets, ids_by_cam)
-            cam_j, sk_id_j = self.index_to_cam_skeleton(j, cam_offsets, ids_by_cam)
-
-            if cam_i == cam_j:
-                continue
-
-            # Usa métricas detalhadas do A_detail quando disponíveis
-            pair = (min(i, j), max(i, j))
-            if A_detail and pair in A_detail:
-                d        = A_detail[pair]
-                avg_cost  = d['avg_cost']
-                avg_dist  = d['avg_dist']
-                avg_score = d['avg_score']
-            else:
-                avg_cost  = 1.0 - score
-                avg_dist  = 0.0
-                avg_score = score
-
-            G.add_edge(
-                (cam_i, sk_id_i), (cam_j, sk_id_j),
-                weight=score,
-                avg_cost=avg_cost,
-                avg_dist=avg_dist,
-                avg_score=avg_score,
-            )
-
-        matched_persons = []
-        G_mst = nx.maximum_spanning_tree(G, weight='weight')
-
-        for component in nx.connected_components(G_mst):
-            nodes_by_camera = {}
-            for raw_cam_id, skt_id in component:
-                cam_id = int(raw_cam_id)
-                nodes_by_camera.setdefault(cam_id, []).append((cam_id, skt_id))
-
-            group_ids = {}
-            for cam_id, nodes in nodes_by_camera.items():
-                if len(nodes) == 1:
-                    group_ids[cam_id] = int(nodes[0][1])
-                else:
-                    best_node = max(nodes, key=lambda n: G_mst.degree(n, weight='weight'))
-                    group_ids[cam_id] = int(best_node[1])
-
-            if len(group_ids) < 2:
-                continue
-
-            total_cost = total_dist = total_score = total_edges = 0
-            subgraph = G_mst.subgraph(component)
-            for n1, n2, data in subgraph.edges(data=True):
-                total_cost  += data['avg_cost']
-                total_dist  += data['avg_dist']
-                total_score += data['avg_score']
-                total_edges += 1
-
-            matched_persons.append({
-                'ids':         group_ids,
-                'score':       total_score / total_edges if total_edges > 0 else 0,
-                'avg_cost':    total_cost  / total_edges if total_edges > 0 else 0,
-                'avg_dist':    total_dist  / total_edges if total_edges > 0 else 0,
-                'num_cameras': len(group_ids),
-                'num_edges':   total_edges,
-            })
-
-        matched_persons.sort(key=lambda x: (-x['num_cameras'], x['avg_cost']))
-        return matched_persons
 
     def _validate_with_cycle_consistency(self, A_matrix, cam_offsets, skeletons_by_cam, ids_by_cam):
 
-        row_nonzero, colum_nonzero = np.nonzero(A_matrix)[0], np.nonzero(A_matrix)[1]
-        m = A_matrix.shape[0]
+        A_original = A_matrix.copy()
+        A_new = A_matrix.copy()
 
-        score_cache = {}
-        for row_val in row_nonzero:
-            for col_val in colum_nonzero:
-                key = tuple([(row_val, col_val), (col_val, row_val)])
-                score_cache[key] = A_matrix[row_val, col_val]
-                if row_val == col_val:
-                    score_cache[key] = 0
-        
-        def get_compatibility_score(row_idx, col_idx):
+        num_cameras = self.num_cameras
 
-            key = tuple([(row_idx, col_idx),(col_idx,row_idx)])
-            if key in score_cache:
-                return score_cache[key]
+        for cam_i, cam_j in combinations(range(num_cameras), 2):
+
+            n_i = len(skeletons_by_cam[cam_i])
+            n_j = len(skeletons_by_cam[cam_j])
+
+            if n_i == 0 or n_j == 0:
+                continue
+
+            start_i = cam_offsets[cam_i]
+            start_j = cam_offsets[cam_j]
             
-            cam_a, sk_id_a = self.index_to_cam_skeleton(row_idx, cam_offsets, ids_by_cam)
-            cam_b, sk_id_b = self.index_to_cam_skeleton(col_idx, cam_offsets, ids_by_cam)
+            # Bloco A_ij
+            A_ij = A_original[
+                start_i:start_i + n_i,
+                start_j:start_j + n_j
+            ]
 
-            sk_a = skeletons_by_cam[cam_a][sk_id_a]
-            sk_b = skeletons_by_cam[cam_b][sk_id_b]
+            # Acumular suporte fornecido
+            # pelas outras câmeras
+            supports = []
 
-            F_a_to_b = self.fundamentals[cam_a][cam_b]
-            F_b_to_a = self.fundamentals[cam_b][cam_a]
+            for cam_k in range(num_cameras):
 
-            score, _ = self._calculate_skeleton_compatibility_vectorized(sk_a, sk_b, F_a_to_b, F_b_to_a)
-            score_cache[key] = score
-            return score
-
-        for ref in range(m):
-            cam_ref, sk_id_ref = self.index_to_cam_skeleton(ref, cam_offsets, ids_by_cam)
-            
-            row_ref = A_matrix[ref, :].copy()
-            row_ref[ref] = 0
-
-            # Candidatos para ref: índices com score > 0 na linha
-            candidate_indices = np.nonzero(row_ref)[0]
-
-            for other in candidate_indices:
-                cam_other, sk_id_other = self.index_to_cam_skeleton(other, cam_offsets, ids_by_cam)
-
-                # Ignorar esqueletos da mesma câmera
-                if cam_other == cam_ref:
+                if cam_k == cam_i or cam_k == cam_j:
                     continue
 
-                original_score = A_matrix[ref, other]
+                n_k = len(skeletons_by_cam[cam_k])
 
-                best_cycle_score = 0
-                found_good_cycle = False
+                if n_k == 0:
+                    continue
 
-                # Buscar terceiros candidatos: esqueletos que combinam com ref
-                third_candidates_scores = []
-                for third in range(m):
-                    if third == ref or third == other:
-                        continue
-                    cam_third, _ = self.index_to_cam_skeleton(third, cam_offsets, ids_by_cam)
-                    if cam_third == cam_ref or cam_third == cam_other:
-                        continue
-                    score_ref_third = get_compatibility_score(ref, third)
-                    third_candidates_scores.append((third, score_ref_third))
+                start_k = cam_offsets[cam_k]
 
-                third_candidates_scores.sort(key=lambda x: x[1], reverse=True)
-                top_thirds = [idx for idx, _ in third_candidates_scores[:self.top_k_cycle_candidates]]
+                A_ik = A_original[
+                    start_i:start_i + n_i,
+                    start_k:start_k + n_k
+                ]
 
-                for third in top_thirds:
-                    score_ref_other  = get_compatibility_score(ref, other)
-                    score_other_third = get_compatibility_score(other, third)
-                    score_ref_third   = get_compatibility_score(ref, third)
+                A_kj = A_original[
+                    start_k:start_k + n_k,
+                    start_j:start_j + n_j
+                ]
 
-                    if score_ref_other > 0 and score_other_third > 0 and score_ref_third > 0:
-                        cycle_score = (score_ref_other * score_other_third * score_ref_third) ** (1/3)
-                    else:
-                        cycle_score = 0
+                products = (A_ik[:, :, None] * A_kj[None, :, :])
 
-                    best_cycle_score = max(best_cycle_score, cycle_score)
+                # melhor caminho i -> k -> j
+                support_k = np.max(products, axis=1)
 
-                    if best_cycle_score > self.early_stop_cycle_score:
-                        found_good_cycle = True
-                        break
-
-                # Combinar score original com o cycle score
-                combined_score = (1 - self.weight_cycle) * original_score + self.weight_cycle * best_cycle_score
-
-                # Atualizar ou zerar na matriz conforme threshold
-                if best_cycle_score >= self.min_cycle_score:
-                    A_matrix[ref, other] = combined_score
-                    A_matrix[other, ref] = combined_score  # manter simetria
-                else:
-                    A_matrix[ref, other] = 0
-                    A_matrix[other, ref] = 0
-
-        return A_matrix
-
-    def _select_best_combination(self, graph_scores, graph_dists):
-
-        scores = np.array(list(graph_scores.values()))
-        dists = np.array([graph_dists[k] for k in graph_scores.keys()])
-        keys = list(graph_scores.keys())
-
-        score_range = scores.max() - scores.min()
-        dist_range = dists.max() - dists.min()
-
-        if score_range > 1e-8:
-            score_norm = (scores - scores.min()) / score_range
-        else:
-            # Se todos os scores são iguais, normaliza para 0.5
-            score_norm = np.full_like(scores, 0.5)  
-
-        if dist_range > 1e-8:
-            dist_norm = (dists - dists.min()) / dist_range
-        else:
-            # Se todas as distâncias são iguais, normaliza para 0.0 (melhor caso)
-            dist_norm = np.zeros_like(dists)
-
-        weight_distance = self.weight_distance
-        weight_score = self.weight_score
-
-        total = weight_distance + weight_score
-
-        if total > 0:
-            weight_distance /= total
-            weight_score /= total
-
-        # Custo combinado (menor é melhor)
-        # +dist_norm para MINIMIZAR distância (valores pequenos = bom)
-        # -score_norm para MAXIMIZAR score (valores grandes = bom)
-        combined_cost = weight_distance * dist_norm - weight_score * score_norm
-
-        best_idx = np.argmin(combined_cost)
-        best_key = keys[best_idx]
-
-        return {
-            'combination': dict(best_key),
-            'original_key': best_key,
-            'score': graph_scores[best_key],
-            'combined_cost': combined_cost[best_idx]
-        }
-
+                supports.append(support_k)
             
-    def match_skeletons(self, skeletons_by_cam, ids_by_cam, use_cycle_consistency=True):
+            if not supports:
+                continue
 
+            supports = np.stack(supports, axis=0)
+
+            cycle_support = np.max(supports, axis=0)
+
+            alpha = self.weight_cycle
+
+            combined = (1.0 - alpha) * A_ij + alpha * cycle_support
+
+            valid = A_ij > 0
+
+            block = np.zeros_like(A_ij)
+
+            block[valid] = combined[valid]
+            weak_direct = A_ij < 0.65
+            weak_cycle = cycle_support < 0.40
+
+            block[valid & weak_direct & weak_cycle ] = 0
+
+            A_new[
+                start_i:start_i + n_i,
+                start_j:start_j + n_j
+            ] = block
+
+            A_new[
+                start_j:start_j + n_j,
+                start_i:start_i + n_i
+            ] = block.T
+
+        return A_new
+
+    def hungarian_pairwise(self, A_matrix, cam_a, cam_b, cam_offsets, skeletons_by_cam, ids_by_cam, min_score=0.30):
+
+        n_a = len(skeletons_by_cam[cam_a])
+        n_b = len(skeletons_by_cam[cam_b])
+
+        if n_a == 0 or n_b == 0:
+            return []
+
+        start_a = cam_offsets[cam_a]
+        start_b = cam_offsets[cam_b]
+
+        affinity = A_matrix[
+            start_a:start_a + n_a,
+            start_b:start_b + n_b
+        ]
+
+        if affinity.size == 0:
+            return []
+        
+        cost = 1.0 - affinity
+
+        row_ind, col_ind = linear_sum_assignment(cost)
+
+        matches = []
+
+        for idx_a, idx_b in zip(row_ind, col_ind):
+
+            score = float(affinity[idx_a, idx_b])
+
+            if score < min_score: continue
+
+            matches.append({
+                "cam_a": cam_a,
+                "cam_b": cam_b,
+
+                "idx_a": int(idx_a),
+                "idx_b": int(idx_b),
+
+                "id_a": ids_by_cam[cam_a][idx_a],
+                "id_b": ids_by_cam[cam_b][idx_b],
+
+                "score":score,})
+        return matches
+
+    def hungarian_all_pairs(self, A_matrix, cam_offsets, skeletons_by_cam, ids_by_cam, min_score=0.3):
+
+        all_matches = []
+
+        for cam_a, cam_b in combinations(range(self.num_cameras), 2):
+
+            matches = self.hungarian_pairwise(
+                A_matrix=A_matrix,
+                cam_a=cam_a,
+                cam_b=cam_b,
+                cam_offsets=cam_offsets,
+                skeletons_by_cam=skeletons_by_cam,
+                ids_by_cam=ids_by_cam,
+                min_score=min_score,
+            )
+
+            all_matches.extend(matches)
+        
+        all_matches.sort(
+            key=lambda m: m["score"],
+            reverse=True
+        )
+
+        return all_matches
+
+    def build_groups_from_hungarian_matches(self, pairwise_matches,):
+
+        parent = {}
+        group_cameras = {}
+
+        def make(node):
+
+            if node not in parent:
+                parent[node] = node
+                group_cameras[node] = {node[0]}
+
+        def find(node):
+
+            if parent[node] != node:
+                parent[node] = find(parent[node])
+
+            return parent[node]
+
+        def union(node_a, node_b):
+
+            make(node_a)
+            make(node_b)
+
+            root_a = find(node_a)
+            root_b = find(node_b)
+
+            if root_a == root_b:
+                return True
+
+            cameras_a = group_cameras[root_a]
+            cameras_b = group_cameras[root_b]
+
+            # Se existe câmera repetida,
+            # unir esses grupos criaria conflito.
+            if not cameras_a.isdisjoint(cameras_b):
+                return False
+
+            parent[root_b] = root_a
+
+            group_cameras[root_a] = (cameras_a | cameras_b)
+
+            del group_cameras[root_b]
+
+            return True
+
+        # Os matches já chegam ordenados
+        # do melhor score para o pior.
+        for match in pairwise_matches:
+
+            node_a = (match["cam_a"], match["id_a"])
+            node_b = (match["cam_b"], match["id_b"])
+
+            union(node_a, node_b)
+
+        # ----------------------------------
+        # recuperar componentes
+        # ----------------------------------
+
+        components = {}
+
+        for node in parent:
+
+            root = find(node)
+
+            components.setdefault(root, []).append(node)
+
+        matched_persons = []
+
+        for nodes in components.values():
+
+            # triangulação exige pelo menos
+            # duas câmeras
+            if len(nodes) < 2:
+                continue
+
+            ids = {}
+
+            for cam_idx, skeleton_id in nodes:
+
+                ids[cam_idx] = skeleton_id
+
+            matched_persons.append({
+                "ids": ids
+            })
+
+        return matched_persons
+
+    def match_skeletons(
+        self,
+        skeletons_by_cam,
+        ids_by_cam,
+        use_cycle_consistency=True,
+    ):
+        """
+        Pipeline atual:
+
+        afinidade epipolar -> suporte de ciclo (opcional) ->
+        Hungarian pairwise -> agrupamento global com restrição
+        de no máximo uma detecção por câmera.
+        """
         total_skeletons = sum(len(s) for s in skeletons_by_cam)
         if total_skeletons == 0:
             return []
 
-        # 1. Matriz global e offsets
-        A_matrix_global, epilines_matrix, cam_offsets = self.build_global_matrix(
-            skeletons_by_cam, ids_by_cam
+        # 1. Matriz global e offsets.
+        A_matrix_global, cam_offsets = self.build_global_matrix(
+            skeletons_by_cam
         )
 
-        # 2. Afinidade geométrica (epipolar)
+        # 2. Afinidade geométrica epipolar.
         A_simple = self.simple_match(
-            skeletons_by_cam, ids_by_cam, A_matrix_global, cam_offsets
+            skeletons_by_cam,
+            ids_by_cam,
+            A_matrix_global,
+            cam_offsets,
         )
 
-        A_simple = self._validate_with_cycle_consistency( A_simple, cam_offsets, skeletons_by_cam, ids_by_cam)
+        # 3. Refinamento por suporte de ciclo, quando habilitado.
+        if use_cycle_consistency:
+            A_simple = self._validate_with_cycle_consistency(
+                A_simple,
+                cam_offsets,
+                skeletons_by_cam,
+                ids_by_cam,
+            )
 
-        # (Opcional) afinidade por interseção de epilinhas
-        line = np.nonzero(A_simple)[0]
-        colum = np.nonzero(A_simple)[1]
-        epilines_matrix = self.refined_match(
-            skeletons_by_cam, ids_by_cam, colum, line, cam_offsets, epilines_matrix
+        # 4. Matching pairwise com Hungarian.
+        pairwise_matches = self.hungarian_all_pairs(
+            A_matrix=A_simple,
+            cam_offsets=cam_offsets,
+            skeletons_by_cam=skeletons_by_cam,
+            ids_by_cam=ids_by_cam,
+            min_score=self.min_compatibility_score,
         )
-        A_intersection, A_detail = self.intersection_affinity(
-            skeletons_by_cam, ids_by_cam, colum, line, cam_offsets, epilines_matrix, A_simple
+
+        # 5. Agrupamento global respeitando uma detecção por câmera.
+        return self.build_groups_from_hungarian_matches(
+            pairwise_matches
         )
-        A_combined = A_simple * A_intersection
-        
-        matched_persons = self.build_skeleton_groups(
-            A_combined, cam_offsets, skeletons_by_cam, ids_by_cam, A_detail=A_detail
-        )
-        return matched_persons
