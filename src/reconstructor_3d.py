@@ -127,7 +127,7 @@ class Reconstructor3D:
                     "average_point": average_point,
                 })
 
-        return self._merge_duplicates(persons, all_annotations)
+        return person_data
 import numpy as np
 
 class Skeleton():

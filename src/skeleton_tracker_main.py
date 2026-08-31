@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 
 import numpy as np
 import cv2
@@ -10,6 +11,8 @@ from skeleton_matcher import SkeletonMatcher
 from reconstructor_3d import Reconstructor3D
 from visualizer import SkeletonViewer3D
 from utils import create_adaptive_camera_grid
+from prediction_exporter import PredictionJSONWriter
+from tracked_3d import SkeletonTracker3D
 
 
 def numpy_to_list(obj):
@@ -83,11 +86,27 @@ def _build_matcher_params():
     }
 
 
-def _run_reconstruction_step(matcher, reconstructor, annotations):
+def _run_reconstruction_step(
+    matcher,
+    reconstructor,
+    annotations,
+    use_cycle_consistency=None,
+    print_matches=False,
+):
     """Passo comum a ambas as fontes: extrai, casa e reconstrói os esqueletos 3D."""
-    skeletons_2d, ids_2d     = matcher.extract_skeletons_from_annotations(annotations)
-    matched_persons          = matcher.match_skeletons(skeletons_2d, ids_2d, cfg.use_cycle_consistency)
-    reconstructed_skeletons  = reconstructor.reconstruct_all(matched_persons, annotations)
+    if use_cycle_consistency is None:
+        use_cycle_consistency = cfg.use_cycle_consistency
+
+    skeletons_2d, ids_2d = matcher.extract_skeletons_from_annotations(annotations)
+    matched_persons = matcher.match_skeletons(
+        skeletons_2d,
+        ids_2d,
+        use_cycle_consistency,
+    )
+    if print_matches:
+        print(matched_persons)
+
+    reconstructed_skeletons = reconstructor.reconstruct_all(matched_persons, annotations)
     skeletons_to_visualize = []
     for idx, person_data in enumerate(reconstructed_skeletons):
 
@@ -139,7 +158,7 @@ def run_is(args):
     channel       = StreamChannel(cfg.broker_uri)
     matcher       = SkeletonMatcher(fundamentals, matcher_params, cfg.is_num_cameras, cfg.num_keypoints)
     reconstructor = Reconstructor3D(projection_matrices, cfg.is_num_cameras, cfg.num_keypoints)
-    viewer = SkeletonViewer3D(size=(900, 700), auto_camera=True)
+    viewer = SkeletonViewer3D(size=(900, 700), auto_camera=False)
 
     print("Loop principal iniciado (IS).")
     try:
@@ -266,10 +285,36 @@ def run_dataset(args):
             return
 
     matcher_params = _build_matcher_params()
-    matcher        = SkeletonMatcher(fundamentals, matcher_params, num_cameras_used, num_keypoints)
-    reconstructor  = Reconstructor3D(projection_matrices, num_cameras_used, num_keypoints)
-    viewer = SkeletonViewer3D(size=(900, 700), auto_camera=True)
+    matcher = SkeletonMatcher(fundamentals, matcher_params, num_cameras_used, num_keypoints)
+    reconstructor = Reconstructor3D(projection_matrices, num_cameras_used, num_keypoints)
+    tracker = SkeletonTracker3D(0.20)
+    if args.cycle == "on":
+        use_cycle_consistency = True
+    elif args.cycle == "off":
+        use_cycle_consistency = False
+    else:
+        use_cycle_consistency = cfg.use_cycle_consistency
 
+    viewer = None
+    if not args.no_visualization:
+        viewer = SkeletonViewer3D(size=(900, 700), auto_camera=False)
+
+    writer = None
+    if args.save_3d_json:
+        writer = PredictionJSONWriter(
+            output_path=args.save_3d_json,
+            dataset_name=dataset_name or "default",
+            camera_ids=camera_ids,
+            use_cycle_consistency=use_cycle_consistency,
+            coordinate_unit=args.coordinate_unit,
+            save_every=args.save_every,
+            one_based_keypoint_ids=True,
+        )
+        print(f"Saida 3D JSON       : {args.save_3d_json}")
+        print(f"Checkpoint JSON     : a cada {args.save_every} frames")
+
+    print(f"Cycle usado         : {use_cycle_consistency}")
+    print(f"Visualizacao        : {'desabilitada' if args.no_visualization else 'habilitada'}")
     print("Loop principal iniciado (dataset).")
     frame_idx = start_frame
 
@@ -282,40 +327,60 @@ def run_dataset(args):
                 break
 
             skeletons_to_visualize = _run_reconstruction_step(
-                matcher, reconstructor, annotations
+                matcher,
+                reconstructor,
+                annotations,
+                use_cycle_consistency=use_cycle_consistency,
+                print_matches=args.print_matches,
             )
 
-            frame_3d = viewer.update(skeletons_to_visualize)
+            skeletons_to_visualize = tracker.update(skeletons_to_visualize)
 
-            grid = create_adaptive_camera_grid(
-                frames,
-                cell_height=360,
-                cell_width=288,
-                add_labels=True,
-            )
-
-            h_grid = grid.shape[0]
-            h_map, w_map = frame_3d.shape[:2]
-
-            if h_map != h_grid:
-                scale = h_grid / h_map
-                frame_3d = cv2.resize(
-                    frame_3d,
-                    (int(w_map * scale), h_grid),
-                    interpolation=cv2.INTER_LINEAR,
+            if writer is not None:
+                writer.add_frame(
+                    frame_idx=frame_idx,
+                    persons=skeletons_to_visualize,
+                    frame_paths=frame_paths,
                 )
 
-            imgcombined = np.hstack([grid, frame_3d])
-            cv2.imshow("Multi-view Skeleton Matching - Dataset", imgcombined)
+            if viewer is not None:
+                frame_3d = viewer.update(skeletons_to_visualize)
 
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
+                grid = create_adaptive_camera_grid(
+                    frames,
+                    cell_height=360,
+                    cell_width=288,
+                    add_labels=True,
+                )
+
+                h_grid = grid.shape[0]
+                h_map, w_map = frame_3d.shape[:2]
+
+                if h_map != h_grid:
+                    scale = h_grid / h_map
+                    frame_3d = cv2.resize(
+                        frame_3d,
+                        (int(w_map * scale), h_grid),
+                        interpolation=cv2.INTER_LINEAR,
+                    )
+
+                imgcombined = np.hstack([grid, frame_3d])
+                cv2.imshow("Multi-view Skeleton Matching - Dataset", imgcombined)
+
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
 
             frame_idx += 1
     finally:
+        if writer is not None:
+            writer.save()
+            print(f"Reconstrucoes 3D salvas em: {args.save_3d_json}")
+
         video_processor.release_resources()
-        viewer.close()
-        cv2.destroyAllWindows()
+
+        if viewer is not None:
+            viewer.close()
+            cv2.destroyAllWindows()
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -334,6 +399,40 @@ def main():
                         help="Origem dos keypoints 2D: 'yolo' ou 'precomputed'.")
     parser.add_argument("--detections_2d", type=str, default=None,
                         help="Diretório com os JSONs 2D pré-computados.")
+    parser.add_argument(
+        "--save_3d_json",
+        type=str,
+        default=None,
+        help="[dataset] Salva todas as reconstruções 3D em um JSON para avaliação posterior.",
+    )
+    parser.add_argument(
+        "--save_every",
+        type=int,
+        default=100,
+        help="[dataset] Faz checkpoint do JSON a cada N frames. 0 salva apenas ao final.",
+    )
+    parser.add_argument(
+        "--no_visualization",
+        action="store_true",
+        help="[dataset] Não inicializa VisPy/OpenCV; recomendado para gerar resultados de benchmark.",
+    )
+    parser.add_argument(
+        "--cycle",
+        choices=["config", "on", "off"],
+        default="config",
+        help="[dataset] Usa cycle consistency conforme config, força ligado ou força desligado.",
+    )
+    parser.add_argument(
+        "--coordinate_unit",
+        choices=["calibration_native", "m", "cm", "mm"],
+        default="calibration_native",
+        help="Metadado da unidade das coordenadas 3D salvas. Não altera numericamente a reconstrução.",
+    )
+    parser.add_argument(
+        "--print_matches",
+        action="store_true",
+        help="Imprime matched_persons em cada frame (desative em benchmarks longos).",
+    )
     args = parser.parse_args()
 
     if args.source == 'is':

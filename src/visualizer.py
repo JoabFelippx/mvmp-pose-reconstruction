@@ -311,9 +311,11 @@ class SkeletonViewer3D:
                 "skeleton_3d"
             ]
 
+            person_id = int(person["id"])
+
             color = np.asarray(
                 PERSON_COLORS[
-                    person_idx % len(PERSON_COLORS)
+                    (person_id - 1) % len(PERSON_COLORS)
                 ],
                 dtype=np.float32,
             )
@@ -490,9 +492,16 @@ class SkeletonViewer3D:
                     f"Pts: {int(num_points)}"
                 )
 
-            rgba = PERSON_COLORS[
-                person["person_idx"] % len(PERSON_COLORS)
-            ]
+
+            person_id = int(person["id"])
+
+            rgba = np.asarray(
+                PERSON_COLORS[
+                    (person_id - 1) % len(PERSON_COLORS)
+                ],
+                dtype=np.float32,
+            )
+            
             text_color = (
                 int(rgba[2] * 255),
                 int(rgba[1] * 255),
