@@ -29,9 +29,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /workspace
 
 # ── Dependências Python do pipeline ─────────────────────────────────
-# Copiamos requirements.txt primeiro para aproveitar cache de layer
-COPY requirements.txt /workspace/requirements.txt
-RUN pip3 install --no-cache-dir -r /workspace/requirements.txt
+# O nó ROS 2 usa YOLO; inclua também as dependências opcionais.
+COPY requirements.txt requirements-yolo.txt /workspace/
+RUN pip3 install --no-cache-dir -r /workspace/requirements-yolo.txt
 
 # Fix: colcon/distutils do Humble não suporta setuptools >= 71 (API canonicalize_version mudou)
 RUN pip3 install --no-cache-dir "setuptools<66"

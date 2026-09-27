@@ -21,7 +21,8 @@ def sampson_error_vectorized(pts1_h, pts2_h, F):
 
 class SkeletonMatcher:
 
-    def __init__(self, fundamentals, matcher_params, num_cameras, num_keypoints):
+    def __init__(self, fundamentals, matcher_params, num_cameras, num_keypoints,
+                 camera_calibrations=None):
         self.fundamentals = fundamentals
         self.num_keypoints = num_keypoints
         self.num_cameras = num_cameras
@@ -33,6 +34,23 @@ class SkeletonMatcher:
         self.weight_quantity = matcher_params["weight_quantity"]
         self.min_compatibility_score = matcher_params["min_compatibility_score"]
         self.weight_cycle = matcher_params["weight_cycle"]
+        self.weight_distance = matcher_params.get("weight_distance", 0.60)
+        self.weight_score = matcher_params.get("weight_score", 0.40)
+        self.distance_d0 = matcher_params.get("distance_d0", 1.25)
+
+        # As calibrações usam os índices locais das câmeras, como fundamentals.
+        # Guarde as transformações inversas para projetar os pés no plano z=0.
+        self.ground_projection = {}
+        for cam_idx, calibration in (camera_calibrations or {}).items():
+            intrinsic = np.asarray(calibration["nK"], dtype=np.float64)
+            rt = np.asarray(calibration["rt"], dtype=np.float64)
+            rt4 = np.vstack((rt, [0.0, 0.0, 0.0, 1.0]))
+            world_from_camera = np.linalg.inv(rt4)
+            self.ground_projection[cam_idx] = (
+                np.linalg.inv(intrinsic),
+                world_from_camera[:3, :3],
+                world_from_camera[:3, 3],
+            )
 
         self.kp_weights_arr = np.array([
             matcher_params["kp_weights"].get(i, 1.0)
@@ -73,6 +91,59 @@ class SkeletonMatcher:
 
         affinity_matrix = np.zeros((offset, offset), dtype=np.float64)
         return affinity_matrix, cam_offsets
+
+    def _ground_center(self, skeleton, cam_idx):
+        """Projeta no chão o ponto sob o quadril e os tornozelos detectados."""
+        if cam_idx not in self.ground_projection:
+            return None
+
+        valid = np.all(np.isfinite(skeleton), axis=1) & np.any(skeleton != 0, axis=1)
+        if not np.any(valid):
+            return None
+
+        # IDs COCO 1-based: quadris 12/13, tornozelos 16/17.
+        hips = [idx for idx in (11, 12) if idx < len(skeleton) and valid[idx]]
+        ankles = [idx for idx in (15, 16) if idx < len(skeleton) and valid[idx]]
+        u = np.mean(skeleton[hips, 0]) if hips else np.mean(skeleton[valid, 0])
+        v = np.max(skeleton[ankles, 1]) if ankles else np.max(skeleton[valid, 1])
+
+        intrinsic_inv, rotation, camera_center = self.ground_projection[cam_idx]
+        ray = rotation @ (intrinsic_inv @ np.array([u, v, 1.0]))
+        if abs(ray[2]) < 1e-12:
+            return None
+        center = camera_center[:2] - camera_center[2] * ray[:2] / ray[2]
+        return center if np.all(np.isfinite(center)) else None
+
+    def distance_affinity(self, skeletons_by_cam, cam_offsets):
+        """Afinidade sigmoide da distância no plano do chão (metros)."""
+        total = sum(len(skeletons) for skeletons in skeletons_by_cam)
+        affinity = np.full((total, total), np.nan, dtype=np.float64)
+        for cam_idx, skeletons in enumerate(skeletons_by_cam):
+            start = cam_offsets[cam_idx]
+            affinity[start:start + len(skeletons), start:start + len(skeletons)] = 0.0
+        np.fill_diagonal(affinity, 1.0)
+
+        centers = {}
+        for cam_idx, skeletons in enumerate(skeletons_by_cam):
+            for idx, skeleton in enumerate(skeletons):
+                center = self._ground_center(np.asarray(skeleton), cam_idx)
+                if center is not None:
+                    centers[cam_offsets[cam_idx] + idx] = center
+
+        for cam_i, cam_j in combinations(range(self.num_cameras), 2):
+            for idx_i in range(len(skeletons_by_cam[cam_i])):
+                i = cam_offsets[cam_i] + idx_i
+                if i not in centers:
+                    continue
+                for idx_j in range(len(skeletons_by_cam[cam_j])):
+                    j = cam_offsets[cam_j] + idx_j
+                    if j not in centers:
+                        continue
+                    distance = np.linalg.norm(centers[i] - centers[j])
+                    x = np.clip(20.0 * (distance - self.distance_d0), -60.0, 60.0)
+                    affinity[i, j] = affinity[j, i] = 1.0 / (1.0 + np.exp(x))
+
+        return affinity
 
 
     def _calculate_skeleton_compatibility_vectorized(self, sk1, sk2, F_1_to_2, F_2_to_1):
@@ -393,6 +464,8 @@ class SkeletonMatcher:
 
         return matched_persons
 
+
+
     def match_skeletons(
         self,
         skeletons_by_cam,
@@ -402,8 +475,8 @@ class SkeletonMatcher:
         """
         Pipeline atual:
 
-        afinidade epipolar -> suporte de ciclo (opcional) ->
-        Hungarian pairwise -> agrupamento global com restrição
+        afinidade epipolar -> suporte de ciclo (opcional) -> distância no chão -> Hungarian pairwise ->
+        agrupamento global com restrição
         de no máximo uma detecção por câmera.
         """
         total_skeletons = sum(len(s) for s in skeletons_by_cam)
@@ -426,22 +499,28 @@ class SkeletonMatcher:
         # 3. Refinamento por suporte de ciclo, quando habilitado.
         if use_cycle_consistency:
             A_simple = self._validate_with_cycle_consistency(
-                A_simple,
-                cam_offsets,
-                skeletons_by_cam,
-                ids_by_cam,
+                A_simple, cam_offsets, skeletons_by_cam, ids_by_cam
             )
 
-        # 4. Matching pairwise com Hungarian.
+        # 4. Combine as afinidades onde a projeção no chão está disponível.
+        # Sem projeção válida, mantenha o score epipolar para evitar NaN no Hungarian.
+        A_distance = self.distance_affinity(skeletons_by_cam, cam_offsets)
+        A_final = A_simple.copy()
+        valid_distance = np.isfinite(A_distance)
+        A_final[valid_distance] = np.sqrt(
+            A_distance[valid_distance] * A_simple[valid_distance]
+        )
+
+        # 5. Matching pairwise com Hungarian.
         pairwise_matches = self.hungarian_all_pairs(
-            A_matrix=A_simple,
+            A_matrix=A_final,
             cam_offsets=cam_offsets,
             skeletons_by_cam=skeletons_by_cam,
             ids_by_cam=ids_by_cam,
             min_score=self.min_compatibility_score,
         )
 
-        # 5. Agrupamento global respeitando uma detecção por câmera.
+        # 6. Agrupamento global respeitando uma detecção por câmera.
         return self.build_groups_from_hungarian_matches(
             pairwise_matches
         )

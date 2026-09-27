@@ -8,8 +8,6 @@ import numpy as np
 
 from is_msgs.image_pb2 import ObjectAnnotations
 
-from skeletons import SkeletonsDetector
-
 class VideoProcessor:
 
     def __init__(
@@ -20,7 +18,7 @@ class VideoProcessor:
         prefix_name,
         file_extension,
         apply_undistort,
-        yolo_model_path,
+        yolo_model_path=None,
         data_path=None,
         loop_frames=False,
         start_frame=0,
@@ -73,7 +71,9 @@ class VideoProcessor:
             self.skeleton_detector = None
             self.precomputed_2d = self._load_precomputed_2d()
         else:
-            self.skeleton_detector = (SkeletonsDetector(yolo_model_path))
+            from skeletons import SkeletonsDetector
+
+            self.skeleton_detector = SkeletonsDetector(yolo_model_path)
 
         self.video_captures = []
         self.image_paths = []

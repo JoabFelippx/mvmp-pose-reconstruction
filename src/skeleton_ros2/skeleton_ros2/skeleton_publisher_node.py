@@ -160,8 +160,9 @@ class SkeletonPublisherNode(Node):
             camera_ids=camera_ids,
         )
 
-        matcher_params = _build_matcher_params()
-        self.matcher = SkeletonMatcher(fundamentals, matcher_params, num_cameras_used, num_keypoints)
+        matcher_params = _build_matcher_params(ds_cfg.get('distance_d0'))
+        self.matcher = SkeletonMatcher(fundamentals, matcher_params, num_cameras_used, num_keypoints,
+                                       all_calibs_local)
         self.reconstructor = Reconstructor3D(projection_matrices, num_cameras_used, num_keypoints)
 
         # Reaproveita a lista de conexões do esqueleto já definida no

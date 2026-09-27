@@ -1,6 +1,8 @@
 import cv2
 import numpy as np
 
+from PyQt6.QtGui import QOffscreenSurface, QOpenGLContext, QSurfaceFormat
+
 from vispy import app, scene
 from vispy.scene import transforms
 
@@ -72,6 +74,8 @@ class SkeletonViewer3D:
             show=False,
         )
 
+        self._setup_render_context()
+
         self.view = self.canvas.central_widget.add_view()
 
         # --------------------------------------------------
@@ -114,6 +118,29 @@ class SkeletonViewer3D:
 
         # Primeira configuração de câmera
         self._camera_initialized = False
+
+    def _setup_render_context(self):
+        # No Wayland, o canvas oculto do Qt pode escolher OpenGL ES.
+        # O framebuffer e os shaders do VisPy exigem OpenGL desktop.
+        # Usamos um contexto próprio, pois o OpenCV também usa Qt.
+        surface_format = QSurfaceFormat()
+        surface_format.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
+        surface_format.setVersion(2, 1)
+
+        self._render_context = QOpenGLContext()
+        self._render_context.setFormat(surface_format)
+        if not self._render_context.create() or self._render_context.isOpenGLES():
+            self.canvas.close()
+            raise RuntimeError("Não foi possível criar um contexto OpenGL desktop para o visualizador.")
+
+        self._render_surface = QOffscreenSurface()
+        # O formato efetivo pode diferir do solicitado ao driver.
+        self._render_surface.setFormat(self._render_context.format())
+        self._render_surface.create()
+        if not self._render_surface.isValid() or not self._render_context.makeCurrent(self._render_surface):
+            self._render_surface.destroy()
+            self.canvas.close()
+            raise RuntimeError("Não foi possível ativar a superfície OpenGL do visualizador.")
 
     # ======================================================
     # CENA
@@ -442,7 +469,10 @@ class SkeletonViewer3D:
         # RENDER
         # ==================================================
 
-        img = self.canvas.render()
+        if not self._render_context.makeCurrent(self._render_surface):
+            raise RuntimeError("Não foi possível ativar o contexto OpenGL do visualizador.")
+
+        img = self.canvas.render(size=(self.width, self.height))
 
         img = np.asarray(img)
 
@@ -540,4 +570,8 @@ class SkeletonViewer3D:
 
     def close(self):
 
-        self.canvas.close()
+        try:
+            self.canvas.close()
+        finally:
+            self._render_context.doneCurrent()
+            self._render_surface.destroy()

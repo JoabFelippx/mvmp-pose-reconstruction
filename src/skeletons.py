@@ -14,7 +14,8 @@ class SkeletonsDetector:
             self._model(dummy_image, device="cuda:0", verbose=False)
         
         self.cuda_stream = torch.cuda.Stream(device="cuda:0")
-
+        pass
+        
     def to_object_annotations(self, humans, kp_scores, image_shape):
         
         obs = ObjectAnnotations()

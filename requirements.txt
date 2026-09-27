@@ -1,11 +1,10 @@
 numpy
-opencv-python-headless
-ultralytics
+opencv-python
 
 matplotlib
 
-is-wire
-is-msgs
+is-wire-sea
+is-msgs-sea
 protobuf
 six
 

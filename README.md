@@ -2,7 +2,7 @@
 
 Pipeline para reconstrução 3D de poses humanas em cenários **multi-câmera** e **multi-pessoa**.
 
-O sistema recebe poses 2D detectadas em diferentes câmeras, calcula a compatibilidade geométrica entre os esqueletos, refina as afinidades utilizando suporte de ciclo entre múltiplas vistas, realiza o matching entre câmeras e reconstrói os keypoints em 3D por triangulação DLT/SVD.
+O sistema recebe poses 2D detectadas em diferentes câmeras, combina compatibilidade epipolar e distância no chão, aplica suporte de ciclo opcional, realiza o matching entre câmeras e reconstrói os keypoints em 3D por triangulação DLT/SVD. No modo dataset, um filtro de Kalman mantém os IDs das pessoas entre frames.
 
 O pipeline suporta duas fontes de entrada:
 
@@ -30,15 +30,14 @@ Também é possível executar a detecção 2D separadamente e reutilizar os resu
   - [Modo IS](#modo-is)
 - [Matching multi-câmera](#matching-multi-câmera)
 - [Reconstrução e erro de reprojeção](#reconstrução-e-erro-de-reprojeção)
+- [Rastreamento temporal](#rastreamento-temporal)
 - [Exportação das reconstruções 3D](#exportação-das-reconstruções-3d)
 - [Avaliação com Ground Truth](#avaliação-com-ground-truth)
 - [Resultados experimentais](#resultados-experimentais)
 - [Geração dos gráficos](#geração-dos-gráficos)
 - [Visualização 3D](#visualização-3d)
-- [Otimizações de desempenho](#otimizações-de-desempenho)
 - [Estrutura do projeto](#estrutura-do-projeto)
 - [Variáveis de ambiente](#variáveis-de-ambiente)
-- [Problemas comuns](#problemas-comuns)
 
 ---
 
@@ -58,7 +57,11 @@ Afinidade geométrica
 (geometria epipolar / erro de Sampson)
         │
         ▼
-Suporte de ciclo multi-view
+Suporte de ciclo multi-view (opcional)
+        │
+        ▼
+Afinidade por distância no chão
+(d0 específico do dataset)
         │
         ▼
 Matching pairwise
@@ -74,6 +77,10 @@ Triangulação
         │
         ▼
 Esqueletos 3D
+        │
+        ▼
+Rastreamento temporal no dataset
+(Kalman em XY + Hungarian)
         │
         ├── Métricas de reprojeção
         ├── Exportação JSON
@@ -100,10 +107,12 @@ Quando `use_undistorted=true`, o pipeline utiliza `nK`, correspondente à matriz
 - suporte ao Espaço Inteligente via AMQP;
 - geometria epipolar entre todos os pares de câmeras;
 - afinidade baseada no erro de Sampson;
+- afinidade por distância no chão, com `d0=1.25` no Campus e `d0=0.25` no Shelf;
 - refinamento das afinidades por suporte de ciclo;
 - matching pairwise com algoritmo Húngaro;
 - agrupamento global com restrição de uma detecção por câmera;
 - reconstrução 3D por DLT/SVD;
+- rastreamento temporal no dataset com Kalman de velocidade constante em XY;
 - erro de reprojeção;
 - métricas de reprojeção por câmera e por joint;
 - exportação das reconstruções 3D em JSON COCO17;
@@ -123,13 +132,11 @@ Quando `use_undistorted=true`, o pipeline utiliza `nK`, correspondente à matriz
 - OpenCV
 - SciPy
 - Matplotlib
-- Ultralytics
-- Vispy
-- PyQt6
-- GPU NVIDIA com CUDA recomendada para a detecção YOLO
+- para inferência/extração YOLO: Ultralytics e PyTorch; o detector em tempo de execução utiliza `cuda:0`
+- para visualização 3D: Vispy, PyQt6 e OpenGL desktop
 - para o modo `is`: acesso a um broker AMQP compatível com o Espaço Inteligente
 
-> O matching, a triangulação e a leitura de detecções pré-computadas não exigem executar a YOLO novamente.
+> Com `--input_2d precomputed`, o pipeline não importa Ultralytics/PyTorch, não carrega o modelo YOLO e não realiza o aquecimento da rede. Esse modo pode ser executado em CPU.
 
 ---
 
@@ -151,19 +158,28 @@ pip install -r requirements.txt
 ```
 
 
-Caso Vispy/PyQt6 ainda não estejam no `requirements.txt`:
+`requirements.txt` contém as dependências para reconstrução com poses pré-computadas, visualização e avaliação. Para executar a YOLO ou extrair novas detecções 2D, instale também as dependências opcionais:
 
 ```bash
-pip install vispy PyQt6
+pip install -r requirements-yolo.txt
 ```
 
-O modelo YOLO não precisa ser armazenado no GitHub. Coloque o arquivo localmente em `models/` ou informe outro caminho na configuração.
+Ultralytics instala o PyTorch como dependência. O modelo configurado para inferência é `models/yolo26x-pose.pt`; ajuste `yolo_model.model_path` se necessário. A configuração do modelo só é lida no modo YOLO.
 
 ---
 
 ## Datasets e calibrações
 
-As calibrações (arquivos `.npz`) — tanto do modo IS (`calibrations/`) quanto dos datasets Campus e Shelf (`datasets/Campus_Seq1/`, `datasets/Shelf_Seq1/`) — **já estão incluídas neste repositório**, já convertidas para o formato esperado pelo pipeline (`K`, `dist`, `rt`, opcionalmente `nK`/`roi`).
+As calibrações do modo IS estão em `calibrations/`. O checkout também contém as calibrações do Campus em `datasets/Campus_Seq1/calib_cameras_campus/`. As calibrações e detecções 2D do Shelf devem ser fornecidas externamente.
+
+O `etc/config.json` atual usa dados externos em `/mnt/datasets`:
+
+| Dataset | Calibrações | Frames |
+|---|---|---|
+| Campus | `/mnt/datasets/Campus/Campus_Seq1/calib_cameras_campus` | `/mnt/datasets/Campus/Campus_Seq1/frames` |
+| Shelf | `/mnt/datasets/Shelf/Shelf_Seq1/calib_cameras_shelf` | `/mnt/datasets/Shelf/Shelf_Seq1/frames` |
+
+Altere `calib_path` e `data_path` de cada dataset se os arquivos estiverem em outro local. Mesmo com `--input_2d precomputed`, o pipeline ainda lê os frames e precisa das calibrações.
 
 As anotações 3D utilizadas na avaliação também estão armazenadas em:
 
@@ -177,33 +193,20 @@ O que **não está neste repositório** são os vídeos/frames dos datasets (arq
 > **Chen, L., Ai, H., Chen, R., Zhuang, Z., & Liu, S. (2020).** *Cross-View Tracking for Multi-Human 3D Pose Estimation at over 100 FPS.* CVPR 2020.
 > Repositório oficial: [longcw/crossview_3d_pose_tracking](https://github.com/longcw/crossview_3d_pose_tracking)
  
-Nesse repositório os próprios autores disponibilizam um link único do [Google Drive](https://drive.google.com/drive/folders/1LJGcP2v0aQDmetnCzO2PiRP1v4jU6sFC?usp=drive_link) para baixar todos os datasets (Campus, Shelf e StoreLayout2) de uma vez. Basta seguir o link do repositório oficial acima, baixar as pastas `Campus_Seq1` e `Shelf_Seq1`, e copiar apenas a pasta `frames/` de cada uma para dentro de `datasets/Campus_Seq1/` e `datasets/Shelf_Seq1/` deste projeto (as calibrações `.npz` já estarão aqui, não é necessário baixá-las de novo nem convertê-las).
+O download dos datasets está disponível no [Google Drive](https://drive.google.com/drive/folders/1LJGcP2v0aQDmetnCzO2PiRP1v4jU6sFC?usp=drive_link) indicado pelo repositório original. Organize os frames e as calibrações `.npz` nos caminhos definidos no `config.json`.
 
 Estrutura esperada localmente após o download:
 
 ```text
-skeleton_3D_matching/
-├── calibrations/
-│   ├── calib_rt1.npz
-│   ├── calib_rt2.npz
-│   ├── calib_rt3.npz
-│   └── calib_rt4.npz
-├── datasets/
-│   ├── Campus_Seq1/
-│   │   ├── calib_cameras_campus{0,1,2}.npz
-│   │   └── frames/
-│   │       ├── Camera0/*.jpg
-│   │       ├── Camera1/*.jpg
-│   │       └── Camera2/*.jpg
-│   └── Shelf_Seq1/
-│       ├── calib_cameras_shelf{0..4}.npz
-│       └── frames/
-│           ├── Camera0/*.jpg
-│           └── ...
-├── models/
-│   └── yolo26m-pose.pt
-└── etc/
-    └── config.json
+/mnt/datasets/
+├── Campus/Campus_Seq1/
+│   ├── calib_cameras_campus/calib_rt{0,1,2}.npz
+│   ├── detections_2d/camera_{0,1,2}.json
+│   └── frames/Camera{0,1,2}/*.jpg
+└── Shelf/Shelf_Seq1/
+    ├── calib_cameras_shelf/calib_rt{0..4}.npz
+    ├── detections_2d/camera_{0..4}.json
+    └── frames/Camera{0..4}/*.jpg
 ```
 
 > **Nota:** o formato de calibração do repositório original (`calibration.json`) é diferente do usado aqui (`.npz` com `K`, `dist`, `rt`, opcionalmente `nK`/`roi`). Se você baixar as calibrações originais do Campus/Shelf, será necessário convertê-las para `.npz` no formato esperado por este pipeline antes de usá-las — os arquivos de vídeo/frames podem ser usados diretamente.
@@ -221,6 +224,8 @@ etc/config.json
 ```
 
 centraliza a configuração do sistema.
+
+Execute os scripts a partir da raiz do repositório, pois os caminhos de configuração são relativos a ela.
 
 As seções principais são:
 
@@ -246,6 +251,8 @@ afinidade epipolar
         ↓
 suporte de ciclo
         ↓
+combinação com distância no chão
+        ↓
 Hungarian
 ```
 
@@ -254,10 +261,14 @@ Com ciclo desativado:
 ```text
 afinidade epipolar
         ↓
+combinação com distância no chão
+        ↓
 Hungarian
 ```
 
 Isso permite comparar experimentalmente o impacto do refinamento por ciclo.
+
+O parâmetro `datasets.<nome>.distance_d0` define o ponto em que a afinidade de distância vale `0.5`: Campus usa `1.25` e Shelf usa `0.25`. O valor acompanha a unidade das calibrações (metros nos datasets usados). Para outras fontes, o fallback é `matcher_parameters.distance_d0`, com default `1.25`; a variável `MATCHER_DISTANCE_D0` sobrescreve esse fallback. O valor específico do dataset tem prioridade.
 
 ---
 
@@ -281,9 +292,9 @@ Linux:
 ```bash
 python src/extract_2d_yolo_threaded.py \
   --model yolo26m-pose.pt \
-  --frames datasets/Campus_Seq1/frames \
-  --calib datasets/Campus_Seq1/calib_cameras_campus \
-  --output datasets/Campus_Seq1/detections_2d \
+  --frames /mnt/datasets/Campus/Campus_Seq1/frames \
+  --calib /mnt/datasets/Campus/Campus_Seq1/calib_cameras_campus \
+  --output /mnt/datasets/Campus/Campus_Seq1/detections_2d \
   --cameras 0,1,2 \
   --device 0 \
   --workers 6 \
@@ -298,9 +309,9 @@ python src/extract_2d_yolo_threaded.py \
 ```bash
 python src/extract_2d_yolo_threaded.py \
   --model yolo26m-pose.pt \
-  --frames datasets/Shelf_Seq1/frames \
-  --calib datasets/Shelf_Seq1/calib_cameras_shelf \
-  --output datasets/Shelf_Seq1/detections_2d \
+  --frames /mnt/datasets/Shelf/Shelf_Seq1/frames \
+  --calib /mnt/datasets/Shelf/Shelf_Seq1/calib_cameras_shelf \
+  --output /mnt/datasets/Shelf/Shelf_Seq1/detections_2d \
   --cameras 0,1,2,3,4 \
   --device 0 \
   --workers 6 \
@@ -375,7 +386,7 @@ python src/skeleton_tracker_main.py \
   --source dataset \
   --dataset_name campus \
   --input_2d precomputed \
-  --detections_2d datasets/Campus_Seq1/detections_2d
+  --detections_2d /mnt/datasets/Campus/Campus_Seq1/detections_2d
 ```
 
 Shelf:
@@ -385,10 +396,12 @@ python src/skeleton_tracker_main.py \
   --source dataset \
   --dataset_name shelf \
   --input_2d precomputed \
-  --detections_2d datasets/Shelf_Seq1/detections_2d
+  --detections_2d /mnt/datasets/Shelf/Shelf_Seq1/detections_2d
 ```
 
-A utilização de poses pré-computadas é recomendada durante o desenvolvimento do matching porque elimina o custo da inferência YOLO em cada execução.
+A utilização de poses pré-computadas elimina o custo da inferência YOLO em cada execução. Basta instalar `requirements.txt`; Ultralytics, PyTorch, CUDA e os pesos da YOLO não são necessários nesse modo. Cada câmera selecionada precisa de um arquivo `camera_<id>.json` no diretório informado.
+
+Use `--no_visualization` para exportar resultados sem carregar VisPy/PyQt6 nem criar um contexto OpenGL.
 
 ### Modo IS
 
@@ -409,7 +422,7 @@ SkeletonDetector.3D.Annotations
 
 ## Matching multi-câmera
 
-O matcher atual utiliza uma estratégia composta por quatro etapas.
+O matcher atual utiliza uma estratégia composta por cinco etapas.
 
 ### 1. Afinidade epipolar
 
@@ -438,7 +451,23 @@ A afinidade direta é então combinada com o melhor suporte fornecido pelas câm
 
 Essa etapa pode ser habilitada ou desabilitada por `use_cycle_consistency`.
 
-### 3. Hungarian pairwise
+### 3. Afinidade por distância no chão
+
+O matcher projeta um ponto sob o quadril e os tornozelos detectados no plano `z=0` usando as calibrações. A distância entre os centros projetados de duas vistas é convertida em afinidade:
+
+```text
+A_distance = 1 / (1 + exp(20 * (distance - d0)))
+A_final = sqrt(A_epipolar * A_distance)
+```
+
+O argumento da exponencial é limitado a `[-60, 60]` para estabilidade numérica. `A_epipolar` já inclui o suporte de ciclo quando ele está habilitado. Se uma projeção não estiver disponível, o matcher preserva a afinidade epipolar daquele par. Os campos `weight_distance` e `weight_score` não são usados nessa média geométrica.
+
+| Dataset | `d0` |
+|---|---:|
+| Campus | 1.25 |
+| Shelf | 0.25 |
+
+### 4. Hungarian pairwise
 
 Depois do refinamento das afinidades, o algoritmo Húngaro resolve o matching bipartido de cada par de câmeras.
 
@@ -450,7 +479,7 @@ Por exemplo, com 5 câmeras:
 C(5,2) = 10 pares
 ```
 
-### 4. Agrupamento global
+### 5. Agrupamento global
 
 Os matches pairwise são ordenados pelo score.
 
@@ -484,6 +513,16 @@ O pipeline calcula:
 - métricas por joint.
 
 Essas informações também podem ser exibidas no visualizador 3D.
+
+---
+
+## Rastreamento temporal
+
+No modo dataset, `SkeletonTracker3D` calcula o centro XY entre os quadris reconstruídos (IDs 12 e 13). Cada pessoa mantém um filtro de Kalman de velocidade constante com estado `[x, y, vx, vy]`.
+
+O filtro prediz o centro no próximo timestamp, e o Hungarian associa as detecções aos tracks pela distância XY. Os defaults são `max_distance=0.30` e `max_missed=10`. Detecções sem associação recebem um novo ID; tracks são removidos ao superar o limite de frames perdidos. O filtro atualiza o centro usado na associação, enquanto os keypoints exportados continuam sendo os pontos triangulados.
+
+Os timestamps vêm de `time.monotonic()` durante o processamento. Portanto, o intervalo usado pelo filtro é o tempo de execução entre frames, e não o intervalo original de captura do dataset.
 
 ---
 
@@ -533,7 +572,7 @@ python src/skeleton_tracker_main.py \
     --source dataset \
     --dataset_name campus \
     --input_2d precomputed \
-    --detections_2d datasets/Campus_Seq1/detections_2d \
+    --detections_2d /mnt/datasets/Campus/Campus_Seq1/detections_2d \
     --save_3d_json results/campus_3d.json \
     --save_every 100 \
     --no_visualization \
@@ -547,7 +586,7 @@ python src/skeleton_tracker_main.py \
     --source dataset \
     --dataset_name campus \
     --input_2d precomputed \
-    --detections_2d datasets/Campus_Seq1/detections_2d \
+    --detections_2d /mnt/datasets/Campus/Campus_Seq1/detections_2d \
     --save_3d_json results/campus_3d_no_cycle.json \
     --save_every 100 \
     --no_visualization \
@@ -561,7 +600,7 @@ python src/skeleton_tracker_main.py \
     --source dataset \
     --dataset_name shelf \
     --input_2d precomputed \
-    --detections_2d datasets/Shelf_Seq1/detections_2d \
+    --detections_2d /mnt/datasets/Shelf/Shelf_Seq1/detections_2d \
     --save_3d_json results/shelf_3d.json \
     --save_every 100 \
     --no_visualization \
@@ -575,7 +614,7 @@ python src/skeleton_tracker_main.py \
     --source dataset \
     --dataset_name shelf \
     --input_2d precomputed \
-    --detections_2d datasets/Shelf_Seq1/detections_2d \
+    --detections_2d /mnt/datasets/Shelf/Shelf_Seq1/detections_2d \
     --save_3d_json results/shelf_3d_no_cycle.json \
     --save_every 100 \
     --no_visualization \
@@ -700,7 +739,7 @@ No **Campus**, entretanto, o mesmo refinamento reduziu o PCP3D de `95.28%` para 
 
 Esse comportamento mostra que o impacto do suporte de ciclo depende da qualidade das afinidades disponíveis entre as diferentes vistas e motiva a investigação de estratégias mais robustas para incorporar a informação de ciclo ao matching.
 
-> **Nota:** esses valores correspondem à configuração experimental atual do pipeline e podem mudar conforme os parâmetros e estratégias de matching forem atualizados.
+> **Nota:** esses valores são resultados dos experimentos já armazenados no repositório. As mudanças na afinidade por distância e no rastreamento com Kalman exigem uma nova execução para medir o desempenho do pipeline atual.
 
 ### Visualização dos resultados
 
@@ -753,6 +792,14 @@ results/plots/
 └── summary.txt
 ```
 
+## Visualização 3D
+
+O visualizador usa VisPy com PyQt6 e renderiza em uma superfície fora da tela com contexto OpenGL desktop. O contexto próprio evita a seleção de OpenGL ES pelo Qt no Wayland. O resultado é exibido junto ao grid de câmeras pelo OpenCV.
+
+Para executar sem visualização, use `--no_visualization` no modo dataset. Nesse caso, VisPy/PyQt6 são carregados apenas se a visualização for solicitada.
+
+---
+
 ## Estrutura do projeto
 
 ```text
@@ -783,12 +830,17 @@ src/
 ├── skeleton_matcher.py
 │   # afinidade epipolar
 │   # suporte de ciclo
+│   # afinidade por distância no chão
 │   # Hungarian
 │   # agrupamento global
 │
 ├── reconstructor_3d.py
 │   # triangulação DLT/SVD
 │   # métricas de reprojeção
+│
+├── tracked_3d.py
+│   # Kalman de velocidade constante em XY
+│   # associação temporal com Hungarian
 │
 ├── skeletons.py
 │   # YOLO Pose
@@ -842,5 +894,6 @@ results/
 | `APPLY_UNDISTORT` | `default_initialization.apply_undistort` | `true` |
 | `NUM_KEYPOINTS` | `keypoint_settings.num_keypoints` | `18` |
 | `MATCHER_*` | parâmetros correspondentes do matcher | ver `config.py` |
+| `MATCHER_DISTANCE_D0` | fallback de `matcher_parameters.distance_d0` (datasets usam seu próprio `distance_d0`) | `1.25` |
 
 ---

@@ -9,11 +9,11 @@ from config import cfg
 from fundamental_matrices import FundamentalMatrices
 from skeleton_matcher import SkeletonMatcher
 from reconstructor_3d import Reconstructor3D
-from visualizer import SkeletonViewer3D
 from utils import create_adaptive_camera_grid
 from prediction_exporter import PredictionJSONWriter
 from tracked_3d import SkeletonTracker3D
 
+import time
 
 def numpy_to_list(obj):
     if isinstance(obj, np.ndarray):
@@ -64,7 +64,7 @@ def _to_image(image, encode_format: str = ".jpeg", compression_level: float = 0.
     return Image(data=cimage[1].tobytes())
 
 
-def _build_matcher_params():
+def _build_matcher_params(distance_d0=None):
     return {
         "use_cycle_consistency":      cfg.use_cycle_consistency,
         "sigma_tolerance":            cfg.sigma_tolerance,
@@ -79,6 +79,7 @@ def _build_matcher_params():
         "max_intersection_dist":      cfg.max_intersection_dist,
         "weight_distance":            cfg.weight_distance,
         "weight_score":               cfg.weight_score,
+        "distance_d0":                cfg.distance_d0 if distance_d0 is None else distance_d0,
         "min_keypoints_for_grouping": cfg.min_keypoints_for_grouping,
         "min_kp_ratio":               cfg.min_kp_ratio,
         "min_fallback_score":         cfg.min_fallback_score,
@@ -131,6 +132,7 @@ def _run_reconstruction_step(
 # ──────────────────────────────────────────────────────────────────────────
 
 def run_is(args):
+    from visualizer import SkeletonViewer3D
     from is_utils.stream_handler import StreamHandler
     from is_utils.streamChannel import StreamChannel
     from is_wire.core import Message
@@ -156,7 +158,8 @@ def run_is(args):
 
     stream        = StreamHandler(cfg.broker_uri, cfg.is_num_cameras, cfg.num_keypoints, all_calibs_parameters)
     channel       = StreamChannel(cfg.broker_uri)
-    matcher       = SkeletonMatcher(fundamentals, matcher_params, cfg.is_num_cameras, cfg.num_keypoints)
+    matcher       = SkeletonMatcher(fundamentals, matcher_params, cfg.is_num_cameras, cfg.num_keypoints,
+                                    all_calibs_parameters)
     reconstructor = Reconstructor3D(projection_matrices, cfg.is_num_cameras, cfg.num_keypoints)
     viewer = SkeletonViewer3D(size=(900, 700), auto_camera=False)
 
@@ -260,7 +263,9 @@ def run_dataset(args):
     # Remapeia para cam_id original — necessário para VideoProcessor
     all_calibs_by_cam_id = {cam_id: all_calibs_local[i] for i, cam_id in enumerate(camera_ids)}
 
-    yolo_model_name = config_file['yolo_model']['model_path']
+    yolo_model_name = (
+        config_file['yolo_model']['model_path'] if args.input_2d == "yolo" else None
+    )
 
     video_processor = VideoProcessor(
         all_calibs_parameters=all_calibs_by_cam_id,
@@ -284,10 +289,11 @@ def run_dataset(args):
             print("Nenhum frame encontrado. Verifique o data_path no config.")
             return
 
-    matcher_params = _build_matcher_params()
-    matcher = SkeletonMatcher(fundamentals, matcher_params, num_cameras_used, num_keypoints)
+    matcher_params = _build_matcher_params(ds_cfg.get("distance_d0"))
+    matcher = SkeletonMatcher(fundamentals, matcher_params, num_cameras_used, num_keypoints,
+                              all_calibs_local)
     reconstructor = Reconstructor3D(projection_matrices, num_cameras_used, num_keypoints)
-    tracker = SkeletonTracker3D(0.20)
+    tracker = SkeletonTracker3D()
     if args.cycle == "on":
         use_cycle_consistency = True
     elif args.cycle == "off":
@@ -297,6 +303,8 @@ def run_dataset(args):
 
     viewer = None
     if not args.no_visualization:
+        from visualizer import SkeletonViewer3D
+
         viewer = SkeletonViewer3D(size=(900, 700), auto_camera=False)
 
     writer = None
@@ -314,6 +322,7 @@ def run_dataset(args):
         print(f"Checkpoint JSON     : a cada {args.save_every} frames")
 
     print(f"Cycle usado         : {use_cycle_consistency}")
+    print(f"Distance d0         : {matcher.distance_d0}")
     print(f"Visualizacao        : {'desabilitada' if args.no_visualization else 'habilitada'}")
     print("Loop principal iniciado (dataset).")
     frame_idx = start_frame
@@ -334,7 +343,8 @@ def run_dataset(args):
                 print_matches=args.print_matches,
             )
 
-            skeletons_to_visualize = tracker.update(skeletons_to_visualize)
+            timestamp = time.monotonic()
+            skeletons_to_visualize = tracker.update(skeletons_to_visualize, timestamp)
 
             if writer is not None:
                 writer.add_frame(
@@ -414,7 +424,7 @@ def main():
     parser.add_argument(
         "--no_visualization",
         action="store_true",
-        help="[dataset] Não inicializa VisPy/OpenCV; recomendado para gerar resultados de benchmark.",
+        help="[dataset] Não carrega o visualizador 3D nem abre janelas; recomendado para benchmarks.",
     )
     parser.add_argument(
         "--cycle",

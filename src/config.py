@@ -65,6 +65,7 @@ class AppConfig:
     max_intersection_dist: float = 3.0
     weight_distance: float = 0.60
     weight_score: float = 0.40
+    distance_d0: float = 1.25
     min_keypoints_for_grouping: int = 10
     min_kp_ratio: float = 0.30
     min_fallback_score: float = 0.78
@@ -135,6 +136,8 @@ def load_config(json_path: str = "etc/config.json") -> AppConfig:
                              mat.get("weight_distance", 0.60), float),
         weight_score=_env("MATCHER_WEIGHT_SCORE",
                           mat.get("weight_score", 0.40), float),
+        distance_d0=_env("MATCHER_DISTANCE_D0",
+                         mat.get("distance_d0", 1.25), float),
         min_keypoints_for_grouping=_env("MATCHER_MIN_KEYPOINTS_FOR_GROUPING",
                                         mat.get("min_keypoints_for_grouping", 10), int),
         min_kp_ratio=_env("MATCHER_MIN_KP_RATIO",

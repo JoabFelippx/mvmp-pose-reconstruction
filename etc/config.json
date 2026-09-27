@@ -12,9 +12,10 @@
 
     "datasets":{
         "campus": {
-            "calib_path": "datasets/Campus_Seq1/calib_cameras_campus",
-            "data_path": "datasets/Campus_Seq1/frames",
+            "calib_path": "/mnt/datasets/Campus/Campus_Seq1/calib_cameras_campus",
+            "data_path": "/mnt/datasets/Campus/Campus_Seq1/frames",
             "num_cameras": 3,
+            "distance_d0": 1.25,
             "start_frame": 0,
             "total_frames": 300,
             "data_type": "images",
@@ -24,9 +25,10 @@
             "apply_undistort": true
         },
         "shelf": {
-            "calib_path": "datasets/Shelf_Seq1/calib_cameras_shelf",
-            "data_path": "datasets/Shelf_Seq1/frames",
+            "calib_path": "/mnt/datasets/Shelf/Shelf_Seq1/calib_cameras_shelf",
+            "data_path": "/mnt/datasets/Shelf/Shelf_Seq1/frames",
             "num_cameras": 5,
+            "distance_d0": 0.25,
             "start_frame": 0,
             "total_frames": 3199,
             "data_type": "images",
@@ -59,6 +61,7 @@
         "max_intersection_dist": 3,
         "weight_distance": 0.60,
         "weight_score": 0.40,
+        "distance_d0": 1.25,
         "min_keypoints_for_grouping": 10,
         "min_kp_ratio": 0.30,
         "min_fallback_score": 0.78,

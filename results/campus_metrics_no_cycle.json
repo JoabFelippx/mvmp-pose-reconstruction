@@ -1,0 +1,67 @@
+{
+  "dataset": "campus",
+  "protocol": "Shelf/Campus PCP3D with annotation_3d.json GT",
+  "official_num_frames": 222,
+  "frame_ranges": [
+    [
+      350,
+      470
+    ],
+    [
+      650,
+      750
+    ]
+  ],
+  "alpha": 0.5,
+  "recall_threshold_mm": 500.0,
+  "prediction_scale_to_mm": 1000.0,
+  "gt_scale_to_mm": 10.0,
+  "num_gt_actors": 3,
+  "actor_pcp": [
+    0.9571428571233236,
+    0.9211640211591473,
+    0.9695652173842786
+  ],
+  "avg_pcp_first_3_actors": 0.9492906985555832,
+  "bone_group_pcp": {
+    "Head": [
+      0.959183673273636,
+      0.9947089946563645,
+      0.9782608694943289
+    ],
+    "Torso": [
+      0.9999999997959184,
+      0.9947089946563645,
+      0.985507246305398
+    ],
+    "Upper arms": [
+      0.9183673468450646,
+      0.9947089946826796,
+      0.981884057935439
+    ],
+    "Lower arms": [
+      0.8877551019502291,
+      0.6269841269675401,
+      0.9239130434447858
+    ],
+    "Upper legs": [
+      0.9999999998979593,
+      0.9947089946826796,
+      0.9855072463411048
+    ],
+    "Lower legs": [
+      0.9999999998979593,
+      0.9947089946826796,
+      0.9746376811241073
+    ]
+  },
+  "recall": 0.9920212765693611,
+  "total_gt_poses": 376,
+  "matched_gt_under_threshold": 373,
+  "nearest_prediction_mpjpe_mm_mean": 98.70386434568644,
+  "nearest_prediction_mpjpe_mm_median": 77.88786075741189,
+  "recalled_mpjpe_mm_mean": 81.16363493618776,
+  "total_json_predictions": 447,
+  "discarded_incomplete_predictions": 0,
+  "missing_official_frames_in_json": 0
+}

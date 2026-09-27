@@ -1,0 +1,5 @@
+-r requirements.txt
+
+# Dependências opcionais para inferência e extração de poses com YOLO.
+# O Ultralytics instala o PyTorch como dependência.
+ultralytics
